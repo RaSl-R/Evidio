@@ -22,6 +22,7 @@ import {
   ListFilter,
   Package,
   History,
+  Download,
 } from 'lucide-react';
 
 interface FieldManagerModalProps {
@@ -64,11 +65,14 @@ export const FieldManagerModal: React.FC<FieldManagerModalProps> = ({
   const activeFields = fieldDefinitions.filter((f) => !f.is_archived);
   const archivedFields = fieldDefinitions.filter((f) => f.is_archived);
 
-  const activeItemFields = activeFields.filter((f) => f.target === 'ITEM');
-  const activeEventFields = activeFields.filter((f) => f.target === 'EVENT');
-
-  const archivedItemFields = archivedFields.filter((f) => f.target === 'ITEM');
-  const archivedEventFields = archivedFields.filter((f) => f.target === 'EVENT');
+  const currentTabFields = activeTab === 'active' ? activeFields : archivedFields;
+  const importedFields = currentTabFields.filter((f) => f.config?.group === 'imported');
+  const displayedItemFields = currentTabFields.filter(
+    (f) => f.target === 'ITEM' && f.config?.group !== 'imported'
+  );
+  const displayedEventFields = currentTabFields.filter(
+    (f) => f.target === 'EVENT' && f.config?.group !== 'imported'
+  );
 
   const handleToggleArchive = async (field: FieldDefinition) => {
     await db.field_definitions.update(field.id, {
@@ -653,14 +657,10 @@ export const FieldManagerModal: React.FC<FieldManagerModalProps> = ({
             <div className="flex items-center gap-2 pb-1 border-b border-slate-100">
               <Package className="w-4 h-4 text-indigo-600" />
               <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                Vlastnosti položky (
-                {activeTab === 'active' ? activeItemFields.length : archivedItemFields.length}
-                )
+                Vlastnosti položky ({displayedItemFields.length})
               </h4>
             </div>
-            <div className="space-y-2">
-              {renderFieldList(activeTab === 'active' ? activeItemFields : archivedItemFields)}
-            </div>
+            <div className="space-y-2">{renderFieldList(displayedItemFields)}</div>
           </div>
 
           {/* Group 2: Vlastnosti události (target EVENT) */}
@@ -668,15 +668,27 @@ export const FieldManagerModal: React.FC<FieldManagerModalProps> = ({
             <div className="flex items-center gap-2 pb-1 border-b border-slate-100">
               <History className="w-4 h-4 text-purple-600" />
               <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                Vlastnosti události (
-                {activeTab === 'active' ? activeEventFields.length : archivedEventFields.length}
-                )
+                Vlastnosti události ({displayedEventFields.length})
               </h4>
             </div>
-            <div className="space-y-2">
-              {renderFieldList(activeTab === 'active' ? activeEventFields : archivedEventFields)}
-            </div>
+            <div className="space-y-2">{renderFieldList(displayedEventFields)}</div>
           </div>
+
+          {/* Group 3: Importovaná pole (if any exist) */}
+          {importedFields.length > 0 && (
+            <div className="space-y-3 pt-2">
+              <div className="flex items-center gap-2 pb-1 border-b border-amber-200">
+                <Download className="w-4 h-4 text-amber-600" />
+                <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wider">
+                  Importovaná pole ({importedFields.length})
+                </h4>
+                <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 font-semibold">
+                  Automaticky obnoveno
+                </span>
+              </div>
+              <div className="space-y-2">{renderFieldList(importedFields)}</div>
+            </div>
+          )}
         </div>
 
         {/* Footer */}

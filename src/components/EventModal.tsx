@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ItemEvent, FieldDefinition, FieldDataType, SelectOption } from '../types';
+import { ItemEvent, FieldDefinition, FieldDataType, SelectOption, Attachment } from '../types';
 import { db } from '../db';
 import { normalizeSearchText } from '../utils/search';
 import { FIELD_DATA_TYPE_LABELS, CREATABLE_FIELD_TYPES } from '../utils/fieldTypes';
-import { X, Calendar, Clock, Tag, Save, Plus, Sliders } from 'lucide-react';
+import { validatePdfFile, MAX_DOCUMENTS_PER_TARGET } from '../utils/attachments';
+import { formatBytes } from '../utils/storage';
+import { X, Calendar, Clock, Tag, Save, Plus, Sliders, FileText, Upload, Trash2, AlertCircle } from 'lucide-react';
 
 interface EventModalProps {
   isOpen: boolean;
@@ -36,6 +38,12 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Document attachments state
+  const [existingDocs, setExistingDocs] = useState<Attachment[]>([]);
+  const [stagedDocs, setStagedDocs] = useState<File[]>([]);
+  const [deletedDocIds, setDeletedDocIds] = useState<string[]>([]);
+  const [docError, setDocError] = useState<string | null>(null);
+
   // Sub-dialog state: Adding new EVENT field directly from event form
   const [isAddingField, setIsAddingField] = useState(false);
   const [newFieldName, setNewFieldName] = useState('');
@@ -51,12 +59,24 @@ export const EventModal: React.FC<EventModalProps> = ({
   const allSuggestions = Array.from(new Set([...existingEventTypes, ...defaultTypes])).filter(Boolean);
 
   useEffect(() => {
+    let isCancelled = false;
     if (eventToEdit) {
       setEventType(eventToEdit.event_type || '');
       setTitle(eventToEdit.title || '');
       setEventDate(eventToEdit.event_date || '');
       setEventTime(eventToEdit.event_time || '');
       setDataValues({ ...(eventToEdit.data || {}) });
+
+      db.attachments
+        .where('event_id')
+        .equals(eventToEdit.id)
+        .filter((a) => a.mime_type === 'application/pdf')
+        .toArray()
+        .then((docs) => {
+          if (!isCancelled) {
+            setExistingDocs(docs);
+          }
+        });
     } else {
       setEventType(existingEventTypes[0] || 'Servis');
       setTitle('');
@@ -67,10 +87,55 @@ export const EventModal: React.FC<EventModalProps> = ({
       setEventDate(`${yyyy}-${mm}-${dd}`);
       setEventTime('');
       setDataValues({});
+      setExistingDocs([]);
     }
+    setStagedDocs([]);
+    setDeletedDocIds([]);
+    setDocError(null);
     setErrors({});
     setIsAddingField(false);
+
+    return () => {
+      isCancelled = true;
+    };
   }, [eventToEdit, isOpen]);
+
+  const activeExistingDocs = existingDocs.filter((d) => !deletedDocIds.includes(d.id));
+  const totalDocCount = activeExistingDocs.length + stagedDocs.length;
+
+  const handleDocFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const remainingSlots = MAX_DOCUMENTS_PER_TARGET - totalDocCount;
+    if (remainingSlots <= 0) {
+      setDocError(`Maximální počet dokumentů na událost je ${MAX_DOCUMENTS_PER_TARGET}.`);
+      e.target.value = '';
+      return;
+    }
+
+    const filesToProcess = Array.from(files).slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      alert(`Lze přidat ještě nejvýše ${remainingSlots} dokumentů. Ostatní byly přeskočeny.`);
+    }
+
+    setDocError(null);
+    const validFiles: File[] = [];
+
+    for (const file of filesToProcess) {
+      const validation = await validatePdfFile(file);
+      if (!validation.isValid) {
+        setDocError(validation.error || `Soubor „${file.name}“ není platným PDF dokumentem.`);
+        continue;
+      }
+      validFiles.push(file);
+    }
+
+    if (validFiles.length > 0) {
+      setStagedDocs((prev) => [...prev, ...validFiles]);
+    }
+    e.target.value = '';
+  };
 
   // Determine which EVENT fields apply to the currently selected event type
   const normCurrentType = normalizeSearchText(eventType);
@@ -234,29 +299,55 @@ export const EventModal: React.FC<EventModalProps> = ({
         }
       }
 
-      if (eventToEdit) {
-        await db.events.update(eventToEdit.id, {
-          event_type: eventType.trim() || 'Událost',
-          title: title.trim(),
-          event_date: eventDate.trim(), // Stored strictly as YYYY-MM-DD
-          event_time: eventTime.trim() ? eventTime.trim() : null,
-          data: cleanedData,
-          updated_at: now,
-        });
-      } else {
-        const newEvent: ItemEvent = {
-          id: crypto.randomUUID(),
-          item_id: itemId,
-          event_type: eventType.trim() || 'Událost',
-          title: title.trim(),
-          event_date: eventDate.trim(), // Stored strictly as YYYY-MM-DD
-          event_time: eventTime.trim() ? eventTime.trim() : null,
-          data: cleanedData,
-          created_at: now,
-          updated_at: now,
-        };
-        await db.events.add(newEvent);
-      }
+      const targetEventId = eventToEdit ? eventToEdit.id : crypto.randomUUID();
+
+      await db.transaction('rw', [db.events, db.attachments], async () => {
+        // Delete removed attachments if any
+        if (deletedDocIds.length > 0) {
+          await db.attachments.bulkDelete(deletedDocIds);
+        }
+
+        // Add staged documents
+        for (const file of stagedDocs) {
+          const att: Attachment = {
+            id: crypto.randomUUID(),
+            item_id: itemId,
+            event_id: targetEventId,
+            file_name: file.name,
+            mime_type: 'application/pdf',
+            size_bytes: file.size,
+            sort_order: 0,
+            blob: file,
+            created_at: now,
+            updated_at: now,
+          };
+          await db.attachments.add(att);
+        }
+
+        if (eventToEdit) {
+          await db.events.update(eventToEdit.id, {
+            event_type: eventType.trim() || 'Událost',
+            title: title.trim(),
+            event_date: eventDate.trim(), // Stored strictly as YYYY-MM-DD
+            event_time: eventTime.trim() ? eventTime.trim() : null,
+            data: cleanedData,
+            updated_at: now,
+          });
+        } else {
+          const newEvent: ItemEvent = {
+            id: targetEventId,
+            item_id: itemId,
+            event_type: eventType.trim() || 'Událost',
+            title: title.trim(),
+            event_date: eventDate.trim(), // Stored strictly as YYYY-MM-DD
+            event_time: eventTime.trim() ? eventTime.trim() : null,
+            data: cleanedData,
+            created_at: now,
+            updated_at: now,
+          };
+          await db.events.add(newEvent);
+        }
+      });
 
       onClose();
     } catch (err: any) {
@@ -728,6 +819,115 @@ export const EventModal: React.FC<EventModalProps> = ({
                     </div>
                   );
                 })
+              )}
+            </div>
+
+            {/* Event Documents Section */}
+            <div className="pt-3 border-t border-slate-100 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <FileText className="w-4 h-4 text-red-500" />
+                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Dokumenty ({totalDocCount} / {MAX_DOCUMENTS_PER_TARGET})
+                  </span>
+                </div>
+
+                {totalDocCount < MAX_DOCUMENTS_PER_TARGET && (
+                  <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-white hover:bg-indigo-50 border border-slate-200 shadow-2xs rounded-xl transition-colors cursor-pointer">
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Přidat dokument</span>
+                    <input
+                      type="file"
+                      accept="application/pdf"
+                      multiple
+                      onChange={handleDocFilesSelected}
+                      className="hidden"
+                    />
+                  </label>
+                )}
+              </div>
+
+              {docError && (
+                <div className="flex items-center gap-2 p-2.5 text-xs text-red-700 bg-red-50 rounded-xl border border-red-200">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                  <span>{docError}</span>
+                </div>
+              )}
+
+              {totalDocCount > 0 ? (
+                <div className="space-y-2">
+                  {/* Existing documents */}
+                  {activeExistingDocs.map((doc) => (
+                    <div
+                      key={doc.id}
+                      className="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-xs"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <FileText className="w-4 h-4 text-red-500 shrink-0" />
+                        <span className="font-semibold text-slate-800 truncate" title={doc.file_name}>
+                          {doc.file_name}
+                        </span>
+                        <span className="text-[11px] text-slate-400 shrink-0">
+                          ({formatBytes(doc.size_bytes)})
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setDeletedDocIds((prev) => [...prev, doc.id])}
+                        className="p-1 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors cursor-pointer shrink-0 ml-2"
+                        title="Odebrat dokument"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+
+                  {/* Staged new documents */}
+                  {stagedDocs.map((file, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between p-2.5 bg-emerald-50/60 rounded-xl border border-emerald-200 text-xs"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <FileText className="w-4 h-4 text-red-500 shrink-0" />
+                        <span className="font-semibold text-slate-800 truncate" title={file.name}>
+                          {file.name}
+                        </span>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-700 font-bold px-1.5 py-0.5 rounded">
+                          Nové
+                        </span>
+                        <span className="text-[11px] text-slate-400 shrink-0">
+                          ({formatBytes(file.size)})
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setStagedDocs((prev) => prev.filter((_, i) => i !== idx))}
+                        className="p-1 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors cursor-pointer shrink-0 ml-2"
+                        title="Odebrat soubor"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <label className="flex flex-col items-center justify-center p-5 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50 hover:bg-slate-100/50 transition-colors cursor-pointer text-slate-400 hover:text-slate-600">
+                  <FileText className="w-6 h-6 stroke-[1.5] mb-1 text-slate-300" />
+                  <span className="text-xs font-semibold text-slate-600">
+                    Přidat PDF dokumenty k této události
+                  </span>
+                  <span className="text-[11px] text-slate-400 mt-0.5">
+                    Až 20 dokumentů · max. 10 MB na soubor · pouze formát PDF
+                  </span>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    multiple
+                    onChange={handleDocFilesSelected}
+                    className="hidden"
+                  />
+                </label>
               )}
             </div>
           </div>

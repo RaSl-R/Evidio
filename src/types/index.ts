@@ -22,6 +22,7 @@ export interface SelectOption {
 
 export interface FieldConfig {
   options?: SelectOption[];
+  group?: string;
 }
 
 export interface FieldValidationRules {
@@ -39,8 +40,18 @@ export interface FieldValidationRules {
   allowed_protocols?: string[];
 }
 
+export interface CollectionGroup {
+  id: string; // UUIDv4
+  name: string;
+  display_order: number;
+  is_default: boolean;
+  created_at: string; // ISO 8601
+  updated_at: string; // ISO 8601
+}
+
 export interface Collection {
   id: string; // UUIDv4
+  group_id: string; // UUIDv4 referencing CollectionGroup
   user_id?: string | null;
   name: string;
   description: string;
@@ -118,6 +129,7 @@ export interface Attachment {
   file_name: string;
   mime_type: string;
   size_bytes: number;
+  sort_order: number;
   blob?: Blob;
   data_base64?: string;
   storage_path?: string;
@@ -129,6 +141,7 @@ export interface EvidioPackage {
   format: 'evidio_package';
   version: 1;
   exported_at: string;
+  collection_groups?: CollectionGroup[];
   collections: Collection[];
   item_types: ItemType[];
   field_definitions: FieldDefinition[];

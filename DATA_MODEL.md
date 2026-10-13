@@ -35,12 +35,19 @@ To ensure strict engineering focus and prevent implementing agents or developers
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│ [User] (Future Extension: Multi-tenancy / Auth)        │
+│ CollectionGroup (UI Label: "Kategorie")               │
+│ - id: UUIDv4                                           │
+│ - name: VARCHAR(255)                                   │
+│ - display_order: INT                                   │
+│ - is_default: BOOLEAN                                  │
+│ - created_at: ISO8601 TIMESTAMPTZ                      │
+│ - updated_at: ISO8601 TIMESTAMPTZ                      │
 └───────────────────────────┬────────────────────────────┘
                             │ 1:N
 ┌───────────────────────────▼────────────────────────────┐
-│ Collection                                             │
+│ Collection (UI Label: "Sekce")                         │
 │ - id: UUIDv4                                           │
+│ - group_id: UUIDv4 (references CollectionGroup)        │
 │ - name: VARCHAR(255)                                   │
 │ - description: TEXT                                    │
 │ - icon: VARCHAR(64)                                    │
@@ -88,16 +95,25 @@ To ensure strict engineering focus and prevent implementing agents or developers
 
 ### Entity Specifications
 
-1. **`Collection`**
-   * Primary root catalog container.
+1. **`CollectionGroup`** (UI Label: *"Kategorie"*)
+   * Category container for organizing collections (sections).
    * `id`: Standard RFC 4122 UUIDv4 string.
+   * `name`: Human-readable category label (e.g. *"Doprava"*, *"Koníčky"*, *"Ostatní"*).
+   * `display_order`: Integer sorting index.
+   * `is_default`: Boolean. Exactly one group has `is_default = true`, initially named *"Ostatní"*. It can be renamed, but never deleted.
+   * `created_at`, `updated_at`: ISO 8601 timestamps.
+
+2. **`Collection`** (UI Label: *"Sekce"*)
+   * Primary catalog container.
+   * `id`: Standard RFC 4122 UUIDv4 string.
+   * `group_id`: UUIDv4 foreign key referencing `CollectionGroup.id`. Required.
    * Attributes: `name`, `description`, `icon`, `display_order`, `created_at`, `updated_at`.
 
-2. **`ItemType`** (Schema Ready, Hidden in v1 UI)
+3. **`ItemType`** (Schema Ready, Hidden in v1 UI)
    * Represents item categories within a collection (e.g. *Osobní automobil*, *Přívěs*).
    * In v1, all items set `item_type_id = null`. In v2, collections can introduce multiple types without changing table structure or migrating existing records.
 
-3. **`FieldDefinition`**
+4. **`FieldDefinition`**
    * Custom field schema registry.
    * `target`: `'ITEM'` (field belongs to the item) or `'EVENT'` (field belongs to an event).
    * **`event_types` (`string[]` | `null`)**:
@@ -113,7 +129,7 @@ To ensure strict engineering focus and prevent implementing agents or developers
    * `display_order`: Integer sorting index.
    * `created_at`, `updated_at`: ISO 8601 timestamps.
 
-4. **`Item`**
+5. **`Item`**
    * Primary entity.
    * `id`: UUIDv4.
    * `collection_id`: UUIDv4 foreign key.
@@ -123,7 +139,7 @@ To ensure strict engineering focus and prevent implementing agents or developers
    * `data`: JSON key-value map where keys are `FieldDefinition.id` UUIDs: `{ [field_id]: value }`.
    * `created_at`, `updated_at`: ISO 8601 timestamps.
 
-5. **`Event`**
+6. **`Event`**
    * Ledger entry attached to an `Item`.
    * `id`: UUIDv4.
    * `item_id`: UUIDv4 foreign key.
@@ -134,7 +150,7 @@ To ensure strict engineering focus and prevent implementing agents or developers
    * `data`: JSON key-value map `{ [field_id]: value }` for field definitions matching `target = 'EVENT'`.
    * `created_at`, `updated_at`: ISO 8601 timestamps.
 
-6. **`Tag`**
+7. **`Tag`**
    * Categorization labels scoped per collection.
    * `id`: UUIDv4.
    * `collection_id`: UUIDv4 foreign key.
@@ -142,7 +158,7 @@ To ensure strict engineering focus and prevent implementing agents or developers
    * `color`: Hex color string (e.g. `"#10b981"`).
    * `created_at`, `updated_at`: ISO 8601 timestamps.
 
-7. **`Attachment`**
+8. **`Attachment`**
    * Photos and documents attached to an `Item` or an `Event`.
    * `id`: UUIDv4.
    * `item_id`: UUIDv4 foreign key.
@@ -232,23 +248,26 @@ Deleting a collection is a critical, destructive action:
 The local browser database uses **Dexie.js** for robust transaction management, multiEntry indexing, and migration chains:
 
 * **Database Name**: `evidio_db`
-* **Version**: `1`
+* **Version**: `2`
 
 #### Dexie Stores Definition:
 ```ts
 import Dexie, { type Table } from 'dexie';
 
 export class EvidioDatabase extends Dexie {
+  collection_groups!: Table<CollectionGroup, string>;
   collections!: Table<Collection, string>;
   item_types!: Table<ItemType, string>;
   field_definitions!: Table<FieldDefinition, string>;
   items!: Table<Item, string>;
-  events!: Table<Event, string>;
+  events!: Table<ItemEvent, string>;
   tags!: Table<Tag, string>;
   attachments!: Table<Attachment, string>;
 
   constructor() {
     super('evidio_db');
+
+    // Schema Version 1 (Initial Release)
     this.version(1).stores({
       collections: 'id, display_order, created_at, updated_at',
       item_types: 'id, collection_id',
@@ -258,11 +277,45 @@ export class EvidioDatabase extends Dexie {
       tags: 'id, collection_id, name',
       attachments: 'id, item_id, event_id, updated_at'
     });
+
+    // Schema Version 2 (Categories / Collection Groups)
+    this.version(2).stores({
+      collection_groups: 'id, display_order',
+      collections: 'id, group_id, display_order, created_at, updated_at'
+    }).upgrade(async (tx) => {
+      // 1. Create or retrieve the default group ("Ostatní")
+      const groupsTable = tx.table('collection_groups');
+      const collectionsTable = tx.table('collections');
+
+      const existingGroups = await groupsTable.toArray();
+      let defaultGroup = existingGroups.find((g) => g.is_default);
+
+      if (!defaultGroup) {
+        defaultGroup = {
+          id: '00000000-0000-4000-8000-000000000001',
+          name: 'Ostatní',
+          display_order: 0,
+          is_default: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+        await groupsTable.add(defaultGroup);
+      }
+
+      // 2. Set group_id on all existing collections without losing any existing attributes
+      await collectionsTable.toCollection().modify((coll) => {
+        if (!coll.group_id) {
+          coll.group_id = defaultGroup.id;
+        }
+      });
+    });
   }
 }
 ```
 
 *Notation Key*:
+* `collection_groups`: `'id, display_order'`.
+* `collections`: `'id, group_id, display_order, created_at, updated_at'`.
 * `*tag_ids`: **multiEntry index** in Dexie/IndexedDB. Allows querying `db.items.where('tag_ids').equals(tagId)` directly with binary search speed.
 * `[collection_id+target]`, `[item_id+event_date]`: **Compound indexes** for optimized sub-entity retrieval.
 
@@ -273,9 +326,21 @@ export class EvidioDatabase extends Dexie {
 Exact 1:1 mapping with identical column names, types, and constraints:
 
 ```sql
--- Collections
+-- Collection Groups (Kategorie)
+CREATE TABLE collection_groups (
+    id UUID PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    display_order INT NOT NULL DEFAULT 0,
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_collection_groups_order ON collection_groups(display_order);
+
+-- Collections (Sekce)
 CREATE TABLE collections (
     id UUID PRIMARY KEY,
+    group_id UUID NOT NULL REFERENCES collection_groups(id) ON DELETE RESTRICT,
     user_id UUID, -- Reserved for future auth/multi-tenant support
     name VARCHAR(255) NOT NULL,
     description TEXT,
@@ -284,6 +349,7 @@ CREATE TABLE collections (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX idx_collections_group ON collections(group_id);
 
 -- Item types (nullable on items for v1 flat structure, ready for v2)
 CREATE TABLE item_types (
@@ -379,7 +445,11 @@ CREATE INDEX idx_attachments_event ON attachments(event_id);
 
 ### 6.1 Package Format & Version Identifier
 * Uniform format identifier: `"format": "evidio_package"`
-* Integer version: `"version": 1`
+* Integer version: `"version": 1` (remains version 1 as an additive change)
+* **Additive Extension: `collection_groups`**:
+  * Optional top-level array: `collection_groups?: CollectionGroup[]`.
+  * Export includes the groups referenced by the exported collections (`collection.group_id`).
+  * Backwards compatibility: A package without `collection_groups` (e.g. legacy export) remains 100% valid. Its sections are automatically assigned to the local default group (`is_default = true`, "Ostatní") upon import.
 * **Version Detection & Future Migrations**:
   * Upon import, the parser inspects `package.format` and `package.version`.
   * If `format !== "evidio_package"`: import is rejected immediately (*"Neplatný formát souboru"*).
@@ -478,14 +548,16 @@ If any error occurs during parsing or binary blob conversion, the transaction ro
 
 | Entity / Property | SQL DDL | IndexedDB Store (Dexie) | Export Package (`version: 1`) | JSON Example | Audit Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Format ID & Version**| N/A | Schema Version `1` | `"format": "evidio_package", "version": 1` | `"format": "evidio_package", "version": 1` | Verified & Unified |
+| **Format ID & Version**| N/A | Schema Version `2` | `"format": "evidio_package", "version": 1` | `"format": "evidio_package", "version": 1` | Verified & Unified |
+| **Collection Groups** | `collection_groups` (table) | `collection_groups: 'id, display_order'` | `collection_groups?: CollectionGroup[]` | `"collection_groups": [...]` | Consistent (v2) |
+| **Collection Group Link**| `group_id UUID NOT NULL` | `group_id` (index on collections) | `group_id: UUID` | `"group_id": "uuid"` | Consistent (v2) |
 | **All Primary IDs** | `UUID` | `id` (UUIDv4 string) | `id` (UUIDv4 string) | Standard RFC 4122 UUIDv4 | Verified |
 | **Field Values Map** | `data JSONB` | `data: {}` | `data: {}` | `"data": { "uuid": val }` | Consistent |
 | **Item Subtype Key** | `item_type_id UUID` | `item_type_id` | `item_type_id` | `"item_type_id": null` | Consistent |
 | **Event Date Format**| `DATE` | `event_date` | `event_date` | `"event_date": "2025-08-14"`| Consistent |
 | **Event Time Format**| `VARCHAR(8)` | `event_time` | `event_time` | `"event_time": "08:30"` / `null` | Consistent |
 | **Event Types Filter**| `event_types TEXT[]`| `event_types: []` | `event_types: []` | `"event_types": ["Servis"]`| Consistent |
-| **Timestamps** | `created_at, updated_at` | `created_at, updated_at` | `created_at, updated_at` | ISO 8601 Strings | Consistent on all 7 entities |
+| **Timestamps** | `created_at, updated_at` | `created_at, updated_at` | `created_at, updated_at` | ISO 8601 Strings | Consistent on all 8 entities |
 | **Tag Associations** | `tag_ids UUID[]` | `*tag_ids` (multiEntry) | `tag_ids: []` | `"tag_ids": ["uuid", ...]` | Consistent |
 | **Attachment Link** | `event_id UUID` | `event_id` | `event_id` | `"event_id": null` or UUID | Consistent |
 | **Binary Storage** | `storage_path TEXT` | `blob: Blob` | `data_base64: string` | Base64 string payload | Consistent |
@@ -501,9 +573,20 @@ Package conforming to `format: "evidio_package"`, `version: 1`:
   "format": "evidio_package",
   "version": 1,
   "exported_at": "2026-10-11T13:10:00Z",
+  "collection_groups": [
+    {
+      "id": "e4b60099-2342-4f30-8911-305bc9b53299",
+      "name": "Doprava",
+      "display_order": 0,
+      "is_default": false,
+      "created_at": "2025-01-10T07:55:00Z",
+      "updated_at": "2025-01-10T07:55:00Z"
+    }
+  ],
   "collections": [
     {
       "id": "3bb68132-7204-4c40-9742-5ca1bfe746a8",
+      "group_id": "e4b60099-2342-4f30-8911-305bc9b53299",
       "name": "Auta",
       "description": "Evidence rodinných a firemních vozidel, servisní kniha a STK",
       "icon": "car",

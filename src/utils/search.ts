@@ -3,7 +3,7 @@
  * Conforms to DATA_MODEL.md section 4.6
  */
 
-import { Item, FieldDefinition, ItemEvent } from '../types';
+import { Item, FieldDefinition, ItemEvent, Tag, Attachment } from '../types';
 
 /**
  * Normalizes text by removing Czech/international diacritics,
@@ -35,6 +35,8 @@ export function matchesQuery(haystack: string, query: string): boolean {
 /**
  * Checks if an item matches search query across:
  * - item name
+ * - item tags (diacritics-insensitive)
+ * - attached document and photo file names (diacritics-insensitive)
  * - item data values (text, numbers, selected option labels)
  * - attached item events (event_type, title, AND event.data custom field values)
  */
@@ -42,12 +44,33 @@ export function itemMatchesSearch(
   item: Item,
   fields: FieldDefinition[],
   query: string,
-  events: ItemEvent[] = []
+  events: ItemEvent[] = [],
+  tags: Tag[] = [],
+  attachments: Attachment[] = []
 ): boolean {
   if (!query.trim()) return true;
 
   // Build searchable text corpus
   const corpusParts: string[] = [item.name];
+
+  // 1. Tags matching
+  if (item.tag_ids && item.tag_ids.length > 0 && tags.length > 0) {
+    const itemTagSet = new Set(item.tag_ids);
+    for (const t of tags) {
+      if (itemTagSet.has(t.id) && t.name) {
+        corpusParts.push(t.name);
+      }
+    }
+  }
+
+  // 2. Attached documents & photos file names
+  if (attachments && attachments.length > 0) {
+    for (const a of attachments) {
+      if (a.file_name) {
+        corpusParts.push(a.file_name);
+      }
+    }
+  }
 
   const fieldMap = new Map(fields.map((f) => [f.id, f]));
 

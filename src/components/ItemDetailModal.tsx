@@ -1,7 +1,17 @@
-import React, { useState } from 'react';
-import { Item, FieldDefinition, ItemEvent } from '../types';
+import React, { useState, useMemo } from 'react';
+import { Item, FieldDefinition, ItemEvent, Attachment, Tag } from '../types';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
+import { processImageFile } from '../utils/image';
+import { getTagColorOption } from '../utils/tagColors';
+import {
+  validatePdfFile,
+  MAX_DOCUMENTS_PER_TARGET,
+} from '../utils/attachments';
+import { ItemPhotoThumbnail } from './ItemPhotoThumbnail';
+import { FullscreenPhotoViewer } from './FullscreenPhotoViewer';
+import { DocumentItemRow } from './DocumentItemRow';
+import { RenameDocumentModal } from './RenameDocumentModal';
 import {
   X,
   Edit2,
@@ -14,6 +24,11 @@ import {
   ChevronDown,
   History,
   Archive,
+  Image as ImageIcon,
+  FileText,
+  Upload,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
 
 interface ItemDetailModalProps {
@@ -21,6 +36,7 @@ interface ItemDetailModalProps {
   onClose: () => void;
   item: Item | null;
   fields: FieldDefinition[];
+  tags?: Tag[];
   onEditItem: (item: Item) => void;
   onDeleteItem: (item: Item) => void;
   onOpenCreateEvent: (item: Item) => void;
@@ -32,6 +48,7 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   onClose,
   item,
   fields,
+  tags = [],
   onEditItem,
   onDeleteItem,
   onOpenCreateEvent,
@@ -39,6 +56,15 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
 }) => {
   const [eventToDelete, setEventToDelete] = useState<ItemEvent | null>(null);
   const [isArchivedExpanded, setIsArchivedExpanded] = useState(false);
+  const [fullscreenPhotoIndex, setFullscreenPhotoIndex] = useState<number | null>(null);
+  const [isProcessingPhotos, setIsProcessingPhotos] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+
+  // Documents state
+  const [isProcessingDocs, setIsProcessingDocs] = useState(false);
+  const [docError, setDocError] = useState<string | null>(null);
+  const [docToRename, setDocToRename] = useState<Attachment | null>(null);
+  const [docToDelete, setDocToDelete] = useState<Attachment | null>(null);
 
   // Live query for events belonging to this item
   const rawEvents = useLiveQuery<ItemEvent[]>(
@@ -48,6 +74,66 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
         : Promise.resolve([] as ItemEvent[]),
     [item?.id]
   );
+
+  // Live query for PHOTOS belonging to this item (image/* only, event_id = null)
+  const rawPhotoAttachments = useLiveQuery<Attachment[]>(
+    () =>
+      item
+        ? db.attachments
+            .where('item_id')
+            .equals(item.id)
+            .filter((a) => !a.event_id && (a.mime_type?.startsWith('image/') ?? false))
+            .toArray()
+        : Promise.resolve([] as Attachment[]),
+    [item?.id]
+  );
+
+  const photos = (rawPhotoAttachments ? [...rawPhotoAttachments] : []).sort(
+    (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)
+  );
+
+  // Live query for DOCUMENTS belonging directly to this item (application/pdf, event_id = null)
+  const itemDocuments = useLiveQuery<Attachment[]>(
+    () =>
+      item
+        ? db.attachments
+            .where('item_id')
+            .equals(item.id)
+            .filter((a) => !a.event_id && a.mime_type === 'application/pdf')
+            .toArray()
+        : Promise.resolve([] as Attachment[]),
+    [item?.id]
+  );
+
+  // Live query for all event documents belonging to this item's events
+  const allEventDocuments = useLiveQuery<Attachment[]>(
+    () =>
+      item
+        ? db.attachments
+            .where('item_id')
+            .equals(item.id)
+            .filter((a) => Boolean(a.event_id) && a.mime_type === 'application/pdf')
+            .toArray()
+        : Promise.resolve([] as Attachment[]),
+    [item?.id]
+  );
+
+  // Map event_id -> Attachment[] (PDF documents)
+  const eventDocsByEventId = useMemo(() => {
+    const map = new Map<string, Attachment[]>();
+    if (allEventDocuments) {
+      for (const doc of allEventDocuments) {
+        if (doc.event_id) {
+          const list = map.get(doc.event_id) || [];
+          list.push(doc);
+          map.set(doc.event_id, list);
+        }
+      }
+    }
+    return map;
+  }, [allEventDocuments]);
+
+  const itemTags = item ? tags.filter((t) => item.tag_ids?.includes(t.id)) : [];
 
   if (!isOpen || !item) return null;
 
@@ -207,10 +293,213 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   const handleDeleteEventConfirm = async () => {
     if (!eventToDelete) return;
     try {
-      await db.events.delete(eventToDelete.id);
+      await db.transaction('rw', [db.events, db.attachments], async () => {
+        await db.attachments.where('event_id').equals(eventToDelete.id).delete();
+        await db.events.delete(eventToDelete.id);
+      });
       setEventToDelete(null);
     } catch (err: any) {
       alert('Chyba při mazání události: ' + (err?.message || 'Neznámá chyba'));
+    }
+  };
+
+  const handleItemDocFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || !item) return;
+
+    const currentDocs = itemDocuments ? [...itemDocuments] : [];
+    const remainingSlots = MAX_DOCUMENTS_PER_TARGET - currentDocs.length;
+    if (remainingSlots <= 0) {
+      setDocError(`Maximální počet dokumentů na položku je ${MAX_DOCUMENTS_PER_TARGET}.`);
+      e.target.value = '';
+      return;
+    }
+
+    const filesToProcess = Array.from(files).slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      alert(`Lze přidat ještě nejvýše ${remainingSlots} dokumentů. Ostatní byly přeskočeny.`);
+    }
+
+    setIsProcessingDocs(true);
+    setDocError(null);
+    const now = new Date().toISOString();
+
+    for (const file of filesToProcess) {
+      const validation = await validatePdfFile(file);
+      if (!validation.isValid) {
+        setDocError(validation.error || `Soubor „${file.name}“ není platným PDF dokumentem.`);
+        continue;
+      }
+
+      try {
+        const newAttachment: Attachment = {
+          id: crypto.randomUUID(),
+          item_id: item.id,
+          event_id: null,
+          file_name: file.name,
+          mime_type: 'application/pdf',
+          size_bytes: file.size,
+          sort_order: 0,
+          blob: file,
+          created_at: now,
+          updated_at: now,
+        };
+        await db.attachments.add(newAttachment);
+      } catch (err: any) {
+        setDocError(err?.message || `Soubor „${file.name}“ se nepodařilo uložit.`);
+      }
+    }
+
+    setIsProcessingDocs(false);
+    e.target.value = '';
+  };
+
+  const handleEventDocFilesSelected = async (
+    eventId: string,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || !item) return;
+
+    const currentDocs = eventDocsByEventId.get(eventId) || [];
+    const remainingSlots = MAX_DOCUMENTS_PER_TARGET - currentDocs.length;
+    if (remainingSlots <= 0) {
+      alert(`Maximální počet dokumentů na událost je ${MAX_DOCUMENTS_PER_TARGET}.`);
+      e.target.value = '';
+      return;
+    }
+
+    const filesToProcess = Array.from(files).slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      alert(`Lze přidat ještě nejvýše ${remainingSlots} dokumentů. Ostatní byly přeskočeny.`);
+    }
+
+    const now = new Date().toISOString();
+
+    for (const file of filesToProcess) {
+      const validation = await validatePdfFile(file);
+      if (!validation.isValid) {
+        alert(validation.error || `Soubor „${file.name}“ není platným PDF dokumentem.`);
+        continue;
+      }
+
+      try {
+        const newAttachment: Attachment = {
+          id: crypto.randomUUID(),
+          item_id: item.id,
+          event_id: eventId,
+          file_name: file.name,
+          mime_type: 'application/pdf',
+          size_bytes: file.size,
+          sort_order: 0,
+          blob: file,
+          created_at: now,
+          updated_at: now,
+        };
+        await db.attachments.add(newAttachment);
+      } catch (err: any) {
+        alert(`Chyba při ukládání souboru „${file.name}“: ${err?.message || 'Neznámá chyba'}`);
+      }
+    }
+
+    e.target.value = '';
+  };
+
+  const handleRenameDoc = async (newName: string) => {
+    if (!docToRename) return;
+    const now = new Date().toISOString();
+    await db.attachments.update(docToRename.id, {
+      file_name: newName,
+      updated_at: now,
+    });
+    setDocToRename(null);
+  };
+
+  const handleDeleteDocConfirm = async () => {
+    if (!docToDelete) return;
+    try {
+      await db.attachments.delete(docToDelete.id);
+      setDocToDelete(null);
+    } catch (err: any) {
+      alert('Chyba při mazání dokumentu: ' + (err?.message || 'Neznámá chyba'));
+    }
+  };
+
+  const handlePhotoFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || !item) return;
+
+    const remainingSlots = 10 - photos.length;
+    if (remainingSlots <= 0) {
+      alert('Maximální počet fotografií na položku je 10.');
+      e.target.value = '';
+      return;
+    }
+
+    const filesToProcess = Array.from(files).slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      alert(`Lze přidat ještě nejvýše ${remainingSlots} fotografií. Ostatní byly přeskočeny.`);
+    }
+
+    setIsProcessingPhotos(true);
+    setPhotoError(null);
+    const now = new Date().toISOString();
+    let nextSortOrder = photos.length;
+
+    for (const file of filesToProcess) {
+      try {
+        const processed = await processImageFile(file);
+        const newAttachment: Attachment = {
+          id: crypto.randomUUID(),
+          item_id: item.id,
+          event_id: null,
+          file_name: processed.file_name,
+          mime_type: processed.mime_type,
+          size_bytes: processed.size_bytes,
+          sort_order: nextSortOrder++,
+          blob: processed.blob,
+          created_at: now,
+          updated_at: now,
+        };
+        await db.attachments.add(newAttachment);
+      } catch (err: any) {
+        setPhotoError(err?.message || `Soubor „${file.name}“ se nepodařilo zpracovat.`);
+      }
+    }
+
+    setIsProcessingPhotos(false);
+    e.target.value = '';
+  };
+
+  const handleSetMainPhoto = async (photoId: string) => {
+    const nextList = [...photos];
+    const idx = nextList.findIndex((p) => p.id === photoId);
+    if (idx <= 0) return;
+    const [chosen] = nextList.splice(idx, 1);
+    nextList.unshift(chosen);
+
+    const now = new Date().toISOString();
+    try {
+      await db.transaction('rw', db.attachments, async () => {
+        for (let i = 0; i < nextList.length; i++) {
+          await db.attachments.update(nextList[i].id, {
+            sort_order: i,
+            updated_at: now,
+          });
+        }
+      });
+    } catch (err: any) {
+      alert('Chyba při změně hlavní fotografie: ' + (err?.message || 'Neznámá chyba'));
+    }
+  };
+
+  const handleDeletePhoto = async (photoId: string) => {
+    if (window.confirm('Opravdu chcete smazat tuto fotografii?')) {
+      try {
+        await db.attachments.delete(photoId);
+      } catch (err: any) {
+        alert('Chyba při mazání fotografie: ' + (err?.message || 'Neznámá chyba'));
+      }
     }
   };
 
@@ -229,6 +518,34 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
             <h2 className="text-xl sm:text-2xl font-extrabold text-slate-900 leading-snug">
               {item.name}
             </h2>
+            {itemTags.length > 0 && (
+              <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                {itemTags.map((tag) => {
+                  const opt = getTagColorOption(tag.color);
+                  return (
+                    <span
+                      key={tag.id}
+                      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
+                        opt
+                          ? `${opt.bgClass} ${opt.textClass} ${opt.borderClass}`
+                          : ''
+                      }`}
+                      style={
+                        !opt
+                          ? {
+                              backgroundColor: `${tag.color}15`,
+                              color: tag.color,
+                              borderColor: `${tag.color}35`,
+                            }
+                          : undefined
+                      }
+                    >
+                      {tag.name}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -264,6 +581,159 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
 
         {/* Scrollable Content */}
         <div className="p-6 overflow-y-auto space-y-6 grow">
+          {/* Item Photos Gallery Box */}
+          <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <ImageIcon className="w-4 h-4 text-slate-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                  Fotografie ({photos.length} / 10)
+                </h3>
+              </div>
+
+              {photos.length < 10 && (
+                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-white hover:bg-indigo-50 border border-slate-200 shadow-2xs rounded-xl transition-colors cursor-pointer">
+                  {isProcessingPhotos ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Zpracovávám...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Přidat fotky</span>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    disabled={isProcessingPhotos}
+                    onChange={handlePhotoFilesSelected}
+                    className="hidden"
+                  />
+                </label>
+              )}
+            </div>
+
+            {photoError && (
+              <div className="flex items-center gap-2 p-2.5 text-xs text-red-700 bg-red-50 rounded-xl border border-red-200">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                <span>{photoError}</span>
+              </div>
+            )}
+
+            {photos.length > 0 ? (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {photos.map((photo, idx) => (
+                  <ItemPhotoThumbnail
+                    key={photo.id}
+                    id={photo.id}
+                    fileName={photo.file_name}
+                    blob={photo.blob}
+                    sizeBytes={photo.size_bytes}
+                    isMain={idx === 0}
+                    onSetMain={idx > 0 ? () => handleSetMainPhoto(photo.id) : undefined}
+                    onDelete={() => handleDeletePhoto(photo.id)}
+                    onClick={() => setFullscreenPhotoIndex(idx)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <label className="flex flex-col items-center justify-center p-6 border-2 border-dashed border-slate-200 rounded-xl bg-white hover:bg-slate-50 transition-colors cursor-pointer text-slate-400 hover:text-slate-600">
+                <ImageIcon className="w-7 h-7 stroke-[1.5] mb-1.5 text-slate-300" />
+                <span className="text-xs font-semibold text-slate-600">
+                  Přidat fotografie k této položce
+                </span>
+                <span className="text-[11px] text-slate-400 mt-0.5">
+                  Až 10 fotografií · automatická optimalizace (max 1600 px)
+                </span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  disabled={isProcessingPhotos}
+                  onChange={handlePhotoFilesSelected}
+                  className="hidden"
+                />
+              </label>
+            )}
+          </div>
+
+          {/* Item Documents Section */}
+          <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <FileText className="w-4 h-4 text-red-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                  Dokumenty ({(itemDocuments?.length || 0)} / {MAX_DOCUMENTS_PER_TARGET})
+                </h3>
+              </div>
+
+              {(itemDocuments?.length || 0) < MAX_DOCUMENTS_PER_TARGET && (
+                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-white hover:bg-indigo-50 border border-slate-200 shadow-2xs rounded-xl transition-colors cursor-pointer">
+                  {isProcessingDocs ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Ukládám...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Přidat dokument</span>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    multiple
+                    disabled={isProcessingDocs}
+                    onChange={handleItemDocFilesSelected}
+                    className="hidden"
+                  />
+                </label>
+              )}
+            </div>
+
+            {docError && (
+              <div className="flex items-center gap-2 p-2.5 text-xs text-red-700 bg-red-50 rounded-xl border border-red-200">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                <span>{docError}</span>
+              </div>
+            )}
+
+            {itemDocuments && itemDocuments.length > 0 ? (
+              <div className="space-y-2">
+                {itemDocuments.map((doc) => (
+                  <DocumentItemRow
+                    key={doc.id}
+                    document={doc}
+                    onRename={(d) => setDocToRename(d)}
+                    onDelete={(d) => setDocToDelete(d)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <label className="flex flex-col items-center justify-center p-6 border-2 border-dashed border-slate-200 rounded-xl bg-white hover:bg-slate-50 transition-colors cursor-pointer text-slate-400 hover:text-slate-600">
+                <FileText className="w-7 h-7 stroke-[1.5] mb-1.5 text-slate-300" />
+                <span className="text-xs font-semibold text-slate-600">
+                  Přidat PDF dokumenty k této položce
+                </span>
+                <span className="text-[11px] text-slate-400 mt-0.5">
+                  Až 20 dokumentů · max. 10 MB na soubor · pouze formát PDF
+                </span>
+                <input
+                  type="file"
+                  accept="application/pdf"
+                  multiple
+                  disabled={isProcessingDocs}
+                  onChange={handleItemDocFilesSelected}
+                  className="hidden"
+                />
+              </label>
+            )}
+          </div>
+
           {/* Custom Item Properties Box */}
           <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
             <div className="flex items-center justify-between">
@@ -443,6 +913,47 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
 
                       {/* Display EVENT custom fields */}
                       {renderEventFieldsSnippet(event.data)}
+
+                      {/* Event Documents */}
+                      {(() => {
+                        const eventDocs = eventDocsByEventId.get(event.id) || [];
+                        return (
+                          <div className="mt-3 pt-2.5 border-t border-slate-100 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold text-slate-600 flex items-center gap-1.5">
+                                <FileText className="w-3.5 h-3.5 text-red-500" />
+                                <span>Dokumenty ({eventDocs.length} / {MAX_DOCUMENTS_PER_TARGET})</span>
+                              </span>
+                              {eventDocs.length < MAX_DOCUMENTS_PER_TARGET && (
+                                <label className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg cursor-pointer transition-colors border border-indigo-100">
+                                  <Plus className="w-3 h-3" />
+                                  <span>Přidat dokument</span>
+                                  <input
+                                    type="file"
+                                    accept="application/pdf"
+                                    multiple
+                                    onChange={(e) => handleEventDocFilesSelected(event.id, e)}
+                                    className="hidden"
+                                  />
+                                </label>
+                              )}
+                            </div>
+
+                            {eventDocs.length > 0 && (
+                              <div className="space-y-1.5">
+                                {eventDocs.map((doc) => (
+                                  <DocumentItemRow
+                                    key={doc.id}
+                                    document={doc}
+                                    onRename={(d) => setDocToRename(d)}
+                                    onDelete={(d) => setDocToDelete(d)}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 ))}
@@ -501,6 +1012,56 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
             </div>
           </div>
         </div>
+      )}
+      {/* Delete Document Confirmation Modal */}
+      {docToDelete && (
+        <div className="fixed inset-0 z-70 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 space-y-4 animate-in fade-in zoom-in-95">
+            <h4 className="font-bold text-base text-slate-900">
+              Smazat dokument?
+            </h4>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Opravdu chcete smazat dokument{' '}
+              <strong className="text-slate-900">„{docToDelete.file_name}“</strong>?
+              Tuto akci nelze vrátit zpět.
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDocToDelete(null)}
+                className="px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
+              >
+                Zrušit
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteDocConfirm}
+                className="px-4 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-xs cursor-pointer"
+              >
+                Smazat dokument
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rename Document Modal */}
+      {docToRename && (
+        <RenameDocumentModal
+          isOpen={true}
+          currentName={docToRename.file_name}
+          onClose={() => setDocToRename(null)}
+          onRename={handleRenameDoc}
+        />
+      )}
+
+      {/* Fullscreen Photo Viewer */}
+      {fullscreenPhotoIndex !== null && photos[fullscreenPhotoIndex] && (
+        <FullscreenPhotoViewer
+          attachments={photos}
+          initialIndex={fullscreenPhotoIndex}
+          onClose={() => setFullscreenPhotoIndex(null)}
+        />
       )}
     </div>
   );

@@ -5,6 +5,7 @@
 
 import Dexie, { type Table } from 'dexie';
 import {
+  CollectionGroup,
   Collection,
   ItemType,
   FieldDefinition,
@@ -14,7 +15,10 @@ import {
   Attachment,
 } from '../types';
 
+export const DEFAULT_GROUP_ID = '00000000-0000-4000-8000-000000000001';
+
 export class EvidioDatabase extends Dexie {
+  collection_groups!: Table<CollectionGroup, string>;
   collections!: Table<Collection, string>;
   item_types!: Table<ItemType, string>;
   field_definitions!: Table<FieldDefinition, string>;
@@ -36,6 +40,39 @@ export class EvidioDatabase extends Dexie {
       tags: 'id, collection_id, name',
       attachments: 'id, item_id, event_id, updated_at',
     });
+
+    // Schema version 2 (Categories / Collection Groups)
+    this.version(2)
+      .stores({
+        collection_groups: 'id, display_order',
+        collections: 'id, group_id, display_order, created_at, updated_at',
+      })
+      .upgrade(async (tx) => {
+        const groupsTable = tx.table('collection_groups');
+        const collectionsTable = tx.table('collections');
+
+        const existingGroups = await groupsTable.toArray();
+        let defaultGroup = existingGroups.find((g: CollectionGroup) => g.is_default);
+
+        if (!defaultGroup) {
+          defaultGroup = {
+            id: DEFAULT_GROUP_ID,
+            name: 'Ostatní',
+            display_order: 0,
+            is_default: true,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          await groupsTable.add(defaultGroup);
+        }
+
+        // Set group_id on ALL existing collections without altering other data
+        await collectionsTable.toCollection().modify((coll: any) => {
+          if (!coll.group_id) {
+            coll.group_id = defaultGroup.id;
+          }
+        });
+      });
   }
 }
 
@@ -72,6 +109,74 @@ export async function getCollectionStats(collectionId: string) {
 }
 
 /**
+ * Ensures the default collection group ("Ostatní") exists.
+ * Exactly one group has is_default = true.
+ */
+export async function ensureDefaultCollectionGroup(): Promise<CollectionGroup> {
+  const existing = await db.collection_groups.filter((g) => g.is_default).first();
+  if (existing) {
+    return existing;
+  }
+
+  const now = new Date().toISOString();
+  const defaultGroup: CollectionGroup = {
+    id: DEFAULT_GROUP_ID,
+    name: 'Ostatní',
+    display_order: 0,
+    is_default: true,
+    created_at: now,
+    updated_at: now,
+  };
+
+  await db.collection_groups.put(defaultGroup);
+  return defaultGroup;
+}
+
+/**
+ * Deletes a collection group after moving all its sections to the default group.
+ * The default group can never be deleted.
+ * Executed in ONE atomic Dexie transaction.
+ */
+export async function deleteCollectionGroupAndReassign(
+  groupIdToDelete: string,
+  targetGroupId?: string
+): Promise<void> {
+  const defaultGroup = await ensureDefaultCollectionGroup();
+  if (groupIdToDelete === defaultGroup.id) {
+    throw new Error('Výchozí kategorii nelze smazat.');
+  }
+
+  const destinationGroupId = targetGroupId || defaultGroup.id;
+  const now = new Date().toISOString();
+
+  await db.transaction('rw', [db.collection_groups, db.collections], async () => {
+    // Move all sections of this group to destination group
+    await db.collections.where('group_id').equals(groupIdToDelete).modify((coll) => {
+      coll.group_id = destinationGroupId;
+      coll.updated_at = now;
+    });
+
+    // Delete the group itself
+    await db.collection_groups.delete(groupIdToDelete);
+  });
+}
+
+/**
+ * Reorders collection groups in a single Dexie transaction.
+ */
+export async function reorderCollectionGroups(groupIdsInOrder: string[]): Promise<void> {
+  const now = new Date().toISOString();
+  await db.transaction('rw', db.collection_groups, async () => {
+    for (let i = 0; i < groupIdsInOrder.length; i++) {
+      await db.collection_groups.update(groupIdsInOrder[i], {
+        display_order: i,
+        updated_at: now,
+      });
+    }
+  });
+}
+
+/**
  * Cascade deletes an entire collection and all child records in ONE atomic Dexie transaction
  */
 export async function deleteCollectionCascade(collectionId: string): Promise<void> {
@@ -105,11 +210,102 @@ export async function deleteCollectionCascade(collectionId: string): Promise<voi
 }
 
 /**
+ * Loads a full snapshot of current IndexedDB state to prepare Mode B (LWW) imports.
+ */
+export async function getExistingDbSnapshot() {
+  const defaultGroup = await ensureDefaultCollectionGroup();
+  const [groups, collections, itemTypes, fieldDefs, tags, items, events, attachments] =
+    await Promise.all([
+      db.collection_groups.toArray(),
+      db.collections.toArray(),
+      db.item_types.toArray(),
+      db.field_definitions.toArray(),
+      db.tags.toArray(),
+      db.items.toArray(),
+      db.events.toArray(),
+      db.attachments.toArray(),
+    ]);
+
+  return {
+    groups,
+    collections,
+    itemTypes,
+    fieldDefs,
+    tags,
+    items,
+    events,
+    attachments,
+    defaultGroupId: defaultGroup.id,
+  };
+}
+
+/**
+ * Persists prepared import data in ONE atomic Dexie transaction using bulkPut.
+ * Any failure triggers full rollback.
+ */
+export async function executeImportTransaction(data: {
+  groupsToPut: CollectionGroup[];
+  collectionsToPut: Collection[];
+  itemTypesToPut: ItemType[];
+  fieldDefsToPut: FieldDefinition[];
+  tagsToPut: Tag[];
+  itemsToPut: Item[];
+  eventsToPut: ItemEvent[];
+  attachmentsToPut: Attachment[];
+}): Promise<void> {
+  await db.transaction(
+    'rw',
+    [
+      db.collection_groups,
+      db.collections,
+      db.item_types,
+      db.field_definitions,
+      db.tags,
+      db.items,
+      db.events,
+      db.attachments,
+    ],
+    async () => {
+      if (data.groupsToPut.length > 0) {
+        await db.collection_groups.bulkPut(data.groupsToPut);
+      }
+      if (data.collectionsToPut.length > 0) {
+        await db.collections.bulkPut(data.collectionsToPut);
+      }
+      if (data.itemTypesToPut.length > 0) {
+        await db.item_types.bulkPut(data.itemTypesToPut);
+      }
+      if (data.fieldDefsToPut.length > 0) {
+        await db.field_definitions.bulkPut(data.fieldDefsToPut);
+      }
+      if (data.tagsToPut.length > 0) {
+        await db.tags.bulkPut(data.tagsToPut);
+      }
+      if (data.itemsToPut.length > 0) {
+        await db.items.bulkPut(data.itemsToPut);
+      }
+      if (data.eventsToPut.length > 0) {
+        await db.events.bulkPut(data.eventsToPut);
+      }
+      if (data.attachmentsToPut.length > 0) {
+        await db.attachments.bulkPut(data.attachmentsToPut);
+      }
+    }
+  );
+}
+
+/**
  * Preloads the demo collection "Auta" if the database is brand new.
  */
 export async function seedDemoCollectionIfEmpty(): Promise<string | null> {
+  const defaultGroup = await ensureDefaultCollectionGroup();
+
   const collectionCount = await db.collections.count();
   if (collectionCount > 0) {
+    // Ensure all existing collections have a valid group_id
+    await db.collections.toCollection().modify((c: any) => {
+      if (!c.group_id) c.group_id = defaultGroup.id;
+    });
     await seedDemoEventFieldsIfMissing();
     const first = await db.collections.orderBy('display_order').first();
     return first ? first.id : null;
@@ -144,6 +340,7 @@ export async function seedDemoCollectionIfEmpty(): Promise<string | null> {
 
   const demoCollection: Collection = {
     id: carCollectionId,
+    group_id: defaultGroup.id,
     name: 'Auta',
     description: 'Evidence rodinných a firemních vozidel, servis a STK',
     icon: 'car',
@@ -373,7 +570,7 @@ export async function seedDemoEventFieldsIfMissing(): Promise<void> {
     // continue
   }
 
-  const carCollection = await db.collections.where('name').equals('Auta').first();
+  const carCollection = await db.collections.filter((c) => c.name === 'Auta').first();
   if (!carCollection) return;
 
   const now = new Date().toISOString();
