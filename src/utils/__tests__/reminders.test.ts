@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { computeReminders, formatRelativeDays } from '../reminders';
 import { sanitizeConfigForTypeChange } from '../fieldTypes';
 import { prepareImportCopy, prepareImportRestore } from '../import';
-import { exportFullPackage } from '../export';
+import { buildEvidioPackage } from '../export';
 import { FieldDefinition, Item, ItemEvent, EvidioPackage, CollectionGroup, Collection } from '../../types';
 
 describe('Deadline Reminders Unit Tests', () => {
@@ -414,6 +414,14 @@ describe('Deadline Reminders Unit Tests', () => {
       expect(sanitizedDate.reminder).toEqual({ enabled: true, days_before: 30 });
     });
 
+    it('preserves config.reminder when constructing package structure for export', () => {
+      expect(pkg.field_definitions).toHaveLength(1);
+      expect(pkg.field_definitions[0].config.reminder).toEqual({
+        enabled: true,
+        days_before: 14,
+      });
+    });
+
     it('survives Mode B restore from backup (reminder config preserved)', () => {
       const prepared = prepareImportRestore(pkg, {
         groups: [],
@@ -433,6 +441,85 @@ describe('Deadline Reminders Unit Tests', () => {
         enabled: true,
         days_before: 14,
       });
+    });
+  });
+
+  describe('11. Event Types Filtering & Case/Diacritics Insensitivity', () => {
+    const eventFieldDefWithFilter: FieldDefinition = {
+      id: 'field-event-filter',
+      collection_id: dummyColId,
+      target: 'EVENT',
+      key: 'stk_check',
+      name: 'Příští STK',
+      data_type: 'date',
+      unit: null,
+      event_types: ['STK / Kontrola'],
+      is_required: false,
+      is_archived: false,
+      display_order: 1,
+      config: {
+        reminder: {
+          enabled: true,
+          days_before: 30,
+        },
+      },
+      validation_rules: {},
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    };
+
+    it('ignores hidden values on an event of non-matching event_type', () => {
+      const item: Item = { ...baseItem };
+      const events: ItemEvent[] = [
+        {
+          id: 'ev-non-matching',
+          item_id: dummyItemId,
+          event_type: 'Servis', // Non-matching event_type
+          title: 'Servisní prohlídka',
+          event_date: '2026-01-10',
+          event_time: null,
+          data: { 'field-event-filter': '2026-05-20' }, // Contains a value but event_type doesn't match
+          created_at: '2026-01-10T00:00:00Z',
+          updated_at: '2026-01-10T00:00:00Z',
+        },
+      ];
+
+      const reminders = computeReminders([eventFieldDefWithFilter], [item], events, '2026-05-01');
+      expect(reminders).toHaveLength(0);
+    });
+
+    it('matches event_types case- and diacritics-insensitively (e.g., "stk / kontrola" matches "STK / Kontrola")', () => {
+      const item: Item = { ...baseItem };
+      const events: ItemEvent[] = [
+        {
+          id: 'ev-matching-insensitive',
+          item_id: dummyItemId,
+          event_type: 'stk / kontrola', // Different casing/diacritics
+          title: 'Prohlídka STK',
+          event_date: '2026-01-10',
+          event_time: null,
+          data: { 'field-event-filter': '2026-05-20' },
+          created_at: '2026-01-10T00:00:00Z',
+          updated_at: '2026-01-10T00:00:00Z',
+        },
+      ];
+
+      const reminders = computeReminders([eventFieldDefWithFilter], [item], events, '2026-05-01');
+      expect(reminders).toHaveLength(1);
+      expect(reminders[0].dueDate).toBe('2026-05-20');
+    });
+  });
+
+  describe('12. Impossible Calendar Date Validation', () => {
+    it('rejects impossible calendar dates like 2026-02-31', () => {
+      const fieldDef = { ...baseItemFieldDef };
+      const item: Item = {
+        ...baseItem,
+        data: { [dummyFieldId]: '2026-02-31' },
+      };
+
+      const reminders = computeReminders([fieldDef], [item], [], '2026-02-01');
+      expect(reminders).toHaveLength(0);
     });
   });
 });

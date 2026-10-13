@@ -1,4 +1,5 @@
 import { FieldDefinition, Item, ItemEvent } from '../types';
+import { normalizeSearchText } from './search';
 
 export type ReminderStatus = 'overdue' | 'today' | 'soon' | 'later';
 
@@ -28,7 +29,19 @@ function parseDateToUtc(dateStr: string): number | null {
 
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
 
-  return Date.UTC(year, month - 1, day);
+  const utcMs = Date.UTC(year, month - 1, day);
+  const d = new Date(utcMs);
+
+  // Validate that the constructed Date object matches the input components
+  if (
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month - 1 ||
+    d.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return utcMs;
 }
 
 /**
@@ -141,8 +154,17 @@ export function computeReminders(
 
         const itemEvents = eventsByItemId.get(item.id) || [];
 
-        // Find events that have a non-empty value for this field
+        // Find events to which this field applies and that have a non-empty value
         const matchingEvents = itemEvents.filter((e) => {
+          // Check if field applies to this event's event_type
+          if (field.event_types && field.event_types.length > 0) {
+            const normEventType = normalizeSearchText(e.event_type || '');
+            const applies = field.event_types.some(
+              (t) => normalizeSearchText(t) === normEventType
+            );
+            if (!applies) return false;
+          }
+
           const rawVal = e.data?.[field.id];
           return rawVal !== undefined && rawVal !== null && String(rawVal).trim() !== '';
         });
