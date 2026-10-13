@@ -20,9 +20,15 @@ export interface SelectOption {
   is_deleted?: boolean;
 }
 
+export interface ReminderConfig {
+  enabled: boolean;
+  days_before: number; // 1..365
+}
+
 export interface FieldConfig {
   options?: SelectOption[];
   group?: string;
+  reminder?: ReminderConfig;
 }
 
 export interface FieldValidationRules {

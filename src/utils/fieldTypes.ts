@@ -82,3 +82,21 @@ export function isTypeTransitionAllowed(
 
   return false;
 }
+
+/**
+ * Sanitizes field configuration when changing data_type.
+ * Removes config.reminder when targetType is not 'date'.
+ */
+export function sanitizeConfigForTypeChange(
+  config: Record<string, any>,
+  targetType: FieldDataType
+): Record<string, any> {
+  const updated = { ...config };
+  if (targetType !== 'single_select') {
+    delete updated.options;
+  }
+  if (targetType !== 'date') {
+    delete updated.reminder;
+  }
+  return updated;
+}

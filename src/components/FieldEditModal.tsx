@@ -336,6 +336,10 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
           delete updatedConfig.options;
         }
 
+        if (targetType !== 'date' && updatedConfig.reminder) {
+          delete updatedConfig.reminder;
+        }
+
         // 3. Update field definition
         await db.field_definitions.update(field.id, {
           name: name.trim(),
