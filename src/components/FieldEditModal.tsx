@@ -6,6 +6,7 @@ import {
   ALL_FIELD_DATA_TYPES,
   getFieldTypeLabel,
   isTypeTransitionAllowed,
+  sanitizeConfigForTypeChange,
   DISALLOWED_TYPE_TRANSITION_REASON,
 } from '../utils/fieldTypes';
 import {
@@ -328,13 +329,14 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
           }
         }
 
-        // 2. Prepare updated config
-        let updatedConfig: any = { ...field.config };
-        if (targetType === 'single_select') {
-          updatedConfig.options = options;
-        } else {
-          delete updatedConfig.options;
-        }
+        // 2. Prepare updated config using sanitizeConfigForTypeChange
+        let updatedConfig: any = sanitizeConfigForTypeChange(
+          {
+            ...field.config,
+            ...(targetType === 'single_select' ? { options } : {}),
+          },
+          targetType
+        );
 
         // 3. Update field definition
         await db.field_definitions.update(field.id, {

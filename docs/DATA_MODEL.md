@@ -123,7 +123,9 @@ To ensure strict engineering focus and prevent implementing agents or developers
      * `["Servis"]` or `["Servis", "STK"]`: The field is displayed and validated **only** when an event matches one of the specified event type strings.
    * `data_type`: String enum (`'text'`, `'long_text'`, `'number'`, `'date'`, `'boolean'`, `'single_select'`, `'multi_select'`, `'url'`).
    * `unit`: Optional presentation string (e.g. `"km"`, `"cm"`, `"g"`, `"Kč"`).
-   * `config`: JSON object storing type-specific configuration (e.g. select options: `options: [{ id: UUID, label: string, color?: string, is_deleted?: boolean }]`).
+   * `config`: JSON object storing type-specific configuration:
+     * Select options: `options: [{ id: UUID, label: string, color?: string, is_deleted?: boolean }]`.
+     * Date deadline reminders: `reminder: { enabled: boolean, days_before: number }` (1..365, allowed **only** for `data_type = 'date'`, target `ITEM` or `EVENT`). Missing `reminder` property = disabled. Older export packages remain fully valid. (SQL requires no schema change as `config` is stored as `JSONB`).
    * `validation_rules`: JSON object (`min`, `max`, `step`, `max_length`, `regex`).
    * `is_required`: Boolean.
    * `is_archived`: Boolean (soft deletion).
@@ -567,6 +569,7 @@ If any error occurs during parsing or binary blob conversion, the transaction ro
 | **Tag Associations** | `tag_ids UUID[]` | `*tag_ids` (multiEntry) | `tag_ids: []` | `"tag_ids": ["uuid", ...]` | Consistent |
 | **Attachment Link** | `event_id UUID` | `event_id` | `event_id` | `"event_id": null` or UUID | Consistent |
 | **Attachment Sort Order** | `sort_order INT NOT NULL DEFAULT 0` | `sort_order: number` (unindexed) | `sort_order: number` | `"sort_order": 0` | Consistent (v1 additive) |
+| **Deadline Reminder Config** | `config JSONB` | `config.reminder` | `config.reminder?: ReminderConfig` | `"reminder": { "enabled": true, "days_before": 30 }` | Consistent (v1 additive) |
 | **Binary Storage** | `storage_path TEXT` | `blob: Blob` | `data_base64: string` | Base64 string payload | Consistent |
 
 ---
@@ -673,7 +676,12 @@ Package conforming to `format: "evidio_package"`, `version: 1`:
       "is_required": false,
       "is_archived": false,
       "display_order": 3,
-      "config": {},
+      "config": {
+        "reminder": {
+          "enabled": true,
+          "days_before": 30
+        }
+      },
       "validation_rules": {},
       "created_at": "2025-01-10T08:10:00Z",
       "updated_at": "2025-01-10T08:10:00Z"
