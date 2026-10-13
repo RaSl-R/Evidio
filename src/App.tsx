@@ -26,6 +26,7 @@ import { ImportModal } from './components/ImportModal';
 import { StorageInfoModal } from './components/StorageInfoModal';
 import { ExportWarningModal } from './components/ExportWarningModal';
 import { ItemCard } from './components/ItemCard';
+import { ItemListItem } from './components/ItemListItem';
 import { EmptyState } from './components/EmptyState';
 
 import {
@@ -40,6 +41,8 @@ import {
   MoreHorizontal,
   Tags,
   Check,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 
 export default function App() {
@@ -60,6 +63,23 @@ export default function App() {
   });
 
   const [searchQuery, setSearchQuery] = useState('');
+
+  // View mode state ("cards" | "list"), remembered in localStorage, default "cards"
+  const [viewMode, setViewMode] = useState<'cards' | 'list'>(() => {
+    try {
+      const saved = localStorage.getItem('evidio_view_mode');
+      return saved === 'list' ? 'list' : 'cards';
+    } catch {
+      return 'cards';
+    }
+  });
+
+  const handleViewModeChange = (mode: 'cards' | 'list') => {
+    setViewMode(mode);
+    try {
+      localStorage.setItem('evidio_view_mode', mode);
+    } catch {}
+  };
 
   // Modals state
   const [isCategoryManagerOpen, setIsCategoryManagerOpen] = useState(false);
@@ -729,15 +749,15 @@ export default function App() {
             {/* Search and Filter Controls */}
             {items && items.length > 0 && (
               <div className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <div className="relative grow max-w-md">
+                <div className="flex items-center gap-2 sm:gap-3">
+                  <div className="relative grow max-w-md min-w-0">
                     <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Hledat položky či události (např. 'skoda', 'servis', 'olej')..."
-                      className="w-full pl-9 pr-9 py-2 rounded-xl border border-slate-200 bg-white text-xs outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 text-slate-900 transition-all"
+                      className="w-full pl-9 pr-9 py-2 rounded-xl border border-slate-200 bg-white text-xs outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 text-slate-900 transition-all truncate"
                     />
                     {searchQuery && (
                       <button
@@ -751,8 +771,44 @@ export default function App() {
                     )}
                   </div>
 
+                  {/* Segmented Control "Karty | Seznam" */}
+                  <div
+                    className="inline-flex items-center p-0.5 sm:p-1 bg-slate-100 rounded-xl border border-slate-200/80 shrink-0"
+                    role="group"
+                    aria-label="Režim zobrazení"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handleViewModeChange('cards')}
+                      className={`inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                        viewMode === 'cards'
+                          ? 'bg-white text-indigo-700 shadow-2xs font-bold'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                      title="Karty"
+                      aria-pressed={viewMode === 'cards'}
+                    >
+                      <LayoutGrid className="w-3.5 h-3.5" />
+                      <span>Karty</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleViewModeChange('list')}
+                      className={`inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                        viewMode === 'list'
+                          ? 'bg-white text-indigo-700 shadow-2xs font-bold'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                      title="Seznam"
+                      aria-pressed={viewMode === 'list'}
+                    >
+                      <List className="w-3.5 h-3.5" />
+                      <span>Seznam</span>
+                    </button>
+                  </div>
+
                   {(searchQuery || selectedFilterTagIds.length > 0) && (
-                    <span className="text-xs text-slate-500 hidden sm:inline">
+                    <span className="text-xs text-slate-500 hidden md:inline shrink-0">
                       Nalezeno: <strong>{filteredItems.length}</strong> z {items.length}
                     </span>
                   )}
@@ -825,7 +881,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Items Grid / Empty State */}
+            {/* Items Grid / List / Empty State */}
             {items && items.length === 0 ? (
               <EmptyState
                 type="no-items"
@@ -844,10 +900,32 @@ export default function App() {
                   setSelectedFilterTagIds([]);
                 }}
               />
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            ) : viewMode === 'cards' ? (
+              <div className="grid grid-cols-1 sm:grid-cols-[repeat(auto-fill,minmax(min(100%,280px),1fr))] gap-3 sm:gap-4">
                 {filteredItems.map((item) => (
                   <ItemCard
+                    key={item.id}
+                    item={item}
+                    fields={fieldDefinitions || []}
+                    events={eventsByItem.get(item.id) || []}
+                    mainPhoto={mainPhotoByItem.get(item.id)}
+                    tags={collectionTags || []}
+                    onOpenDetail={(it) => {
+                      setSelectedDetailItemId(it.id);
+                      setIsDetailModalOpen(true);
+                    }}
+                    onEdit={(it) => {
+                      setItemToEdit(it);
+                      setIsItemModalOpen(true);
+                    }}
+                    onDelete={(it) => setItemToDelete(it)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filteredItems.map((item) => (
+                  <ItemListItem
                     key={item.id}
                     item={item}
                     fields={fieldDefinitions || []}
