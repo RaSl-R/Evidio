@@ -92,3 +92,19 @@ unless a task explicitly says so (cloud/Neon is an open decision).
   separate modules without UI so it can be unit-tested; add Vitest tests for it.
 - Before finishing: build, run all tests, then describe in the PR/summary what
   changed, which files, risks, and anything you could not verify.
+
+## Lessons from earlier iterations
+- React hooks are always called unconditionally at the top of a component,
+  BEFORE any early return (a useMemo below `if (!open) return null` crashed
+  the detail modal).
+- `vite build` does not type-check: also run `npx tsc --noEmit` before
+  finishing.
+- Reminders: use the pure functions in src/utils/reminders.ts through the
+  useReminders hook; never compute deadlines a second time elsewhere. Days
+  between dates use Date.UTC differences on YYYY-MM-DD strings.
+- Event reminders: ItemEvent.reminder is optional; missing means enabled,
+  30 days. Past events never produce reminders.
+- Dialog stacking: detail z-50, dialogs opened from it z-60, confirmations
+  z-70, FieldEditModal opened from a form z-80.
+- Always end with a list of EVERY changed file; never claim completion
+  without it.

@@ -1,11 +1,17 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ItemEvent, FieldDefinition, FieldDataType, SelectOption, Attachment } from '../types';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { ItemEvent, FieldDefinition, FieldDataType, SelectOption, Attachment, FieldConfig, ReminderConfig } from '../types';
 import { db } from '../db';
 import { normalizeSearchText } from '../utils/search';
 import { FIELD_DATA_TYPE_LABELS, CREATABLE_FIELD_TYPES } from '../utils/fieldTypes';
 import { validatePdfFile, MAX_DOCUMENTS_PER_TARGET } from '../utils/attachments';
 import { formatBytes } from '../utils/storage';
-import { X, Calendar, Clock, Tag, Save, Plus, Sliders, FileText, Upload, Trash2, AlertCircle } from 'lucide-react';
+import { useToday } from '../hooks/useToday';
+import { ReminderQuickPopover } from './ReminderQuickPopover';
+import { ReminderConfigEditor } from './ReminderConfigEditor';
+import { FieldEditModal } from './FieldEditModal';
+import { FieldCreateModal } from './FieldCreateModal';
+import { X, Calendar, Clock, Tag, Save, Plus, Sliders, FileText, Upload, Trash2, AlertCircle, Edit2, BellOff } from 'lucide-react';
 
 interface EventModalProps {
   isOpen: boolean;
@@ -38,22 +44,64 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Reminder state
+  const todayStr = useToday();
+  const [reminderEnabled, setReminderEnabled] = useState(true);
+  const [reminderDaysBefore, setReminderDaysBefore] = useState(30);
+  const [initialReminderState, setInitialReminderState] = useState<{
+    enabled: boolean;
+    daysBefore: number;
+    hadExplicit: boolean;
+  }>({
+    enabled: true,
+    daysBefore: 30,
+    hadExplicit: false,
+  });
+
   // Document attachments state
   const [existingDocs, setExistingDocs] = useState<Attachment[]>([]);
   const [stagedDocs, setStagedDocs] = useState<File[]>([]);
   const [deletedDocIds, setDeletedDocIds] = useState<string[]>([]);
   const [docError, setDocError] = useState<string | null>(null);
 
-  // Sub-dialog state: Adding new EVENT field directly from event form
+  // Sub-dialog state: Adding new EVENT field via FieldCreateModal
   const [isAddingField, setIsAddingField] = useState(false);
-  const [newFieldName, setNewFieldName] = useState('');
-  const [newFieldType, setNewFieldType] = useState<FieldDataType>('text');
-  const [newFieldUnit, setNewFieldUnit] = useState('');
-  const [newFieldRequired, setNewFieldRequired] = useState(false);
-  const [newFieldScope, setNewFieldScope] = useState<'current' | 'all'>('current');
-  const [newOptionChipInput, setNewOptionChipInput] = useState('');
-  const [newOptionChips, setNewOptionChips] = useState<string[]>([]);
-  const [newFieldError, setNewFieldError] = useState<string | null>(null);
+  const [highlightedFieldId, setHighlightedFieldId] = useState<string | null>(null);
+
+  // Shortcut to edit custom event property (FieldEditModal)
+  const [fieldToEdit, setFieldToEdit] = useState<FieldDefinition | null>(null);
+
+  // Live query for field definitions
+  const liveFieldDefinitions = useLiveQuery<FieldDefinition[]>(
+    () =>
+      collectionId
+        ? db.field_definitions.where('collection_id').equals(collectionId).sortBy('sort_order')
+        : Promise.resolve([]),
+    [collectionId]
+  );
+  const currentFieldDefs = liveFieldDefinitions || fieldDefinitions;
+
+  const currentFieldToEdit = fieldToEdit
+    ? currentFieldDefs.find((f) => f.id === fieldToEdit.id) || fieldToEdit
+    : null;
+
+  const handleFieldSaved = async (fieldId: string, oldType: FieldDataType, newType: FieldDataType) => {
+    if (oldType !== newType) {
+      if (eventToEdit) {
+        const freshEvent = await db.events.get(eventToEdit.id);
+        const storedVal = freshEvent?.data?.[fieldId];
+        setDataValues((prev) => ({
+          ...prev,
+          [fieldId]: storedVal !== undefined ? storedVal : (newType === 'boolean' ? false : ''),
+        }));
+      } else {
+        setDataValues((prev) => ({
+          ...prev,
+          [fieldId]: newType === 'boolean' ? false : '',
+        }));
+      }
+    }
+  };
 
   const defaultTypes = ['Servis', 'STK', 'Údržba', 'Oprava', 'Přezutí', 'Kontrola', 'Nákup dílu'];
   const allSuggestions = Array.from(new Set([...existingEventTypes, ...defaultTypes])).filter(Boolean);
@@ -66,6 +114,17 @@ export const EventModal: React.FC<EventModalProps> = ({
       setEventDate(eventToEdit.event_date || '');
       setEventTime(eventToEdit.event_time || '');
       setDataValues({ ...(eventToEdit.data || {}) });
+
+      const hadExplicit = eventToEdit.reminder !== undefined;
+      const remEnabled = eventToEdit.reminder?.enabled ?? true;
+      const remDays = eventToEdit.reminder?.days_before ?? 30;
+      setReminderEnabled(remEnabled);
+      setReminderDaysBefore(remDays);
+      setInitialReminderState({
+        enabled: remEnabled,
+        daysBefore: remDays,
+        hadExplicit,
+      });
 
       db.attachments
         .where('event_id')
@@ -88,6 +147,14 @@ export const EventModal: React.FC<EventModalProps> = ({
       setEventTime('');
       setDataValues({});
       setExistingDocs([]);
+
+      setReminderEnabled(true);
+      setReminderDaysBefore(30);
+      setInitialReminderState({
+        enabled: true,
+        daysBefore: 30,
+        hadExplicit: false,
+      });
     }
     setStagedDocs([]);
     setDeletedDocIds([]);
@@ -99,6 +166,8 @@ export const EventModal: React.FC<EventModalProps> = ({
       isCancelled = true;
     };
   }, [eventToEdit, isOpen]);
+
+  const isPastEvent = Boolean(eventDate && eventDate < todayStr);
 
   const activeExistingDocs = existingDocs.filter((d) => !deletedDocIds.includes(d.id));
   const totalDocCount = activeExistingDocs.length + stagedDocs.length;
@@ -140,14 +209,14 @@ export const EventModal: React.FC<EventModalProps> = ({
   // Determine which EVENT fields apply to the currently selected event type
   const normCurrentType = normalizeSearchText(eventType);
   const visibleEventFields = useMemo(() => {
-    return fieldDefinitions.filter((f) => {
+    return currentFieldDefs.filter((f) => {
       if (f.target !== 'EVENT' || f.is_archived) return false;
       // Empty or null event_types means field applies universally to all event types
       if (!f.event_types || f.event_types.length === 0) return true;
       // Otherwise, match case and diacritics insensitively
       return f.event_types.some((t) => normalizeSearchText(t) === normCurrentType);
     });
-  }, [fieldDefinitions, normCurrentType]);
+  }, [currentFieldDefs, normCurrentType]);
 
   if (!isOpen) return null;
 
@@ -165,88 +234,26 @@ export const EventModal: React.FC<EventModalProps> = ({
     }
   };
 
-  const handleAddOptionChip = () => {
-    const trimmed = newOptionChipInput.trim();
-    if (trimmed && !newOptionChips.includes(trimmed)) {
-      setNewOptionChips([...newOptionChips, trimmed]);
-      setNewOptionChipInput('');
+  const handleFieldCreated = (newField: FieldDefinition) => {
+    setHighlightedFieldId(newField.id);
+    if (newField.data_type === 'boolean') {
+      setDataValues((prev) => ({
+        ...prev,
+        [newField.id]: false,
+      }));
     }
-  };
-
-  const handleSaveNewField = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newFieldName.trim()) {
-      setNewFieldError('Zadejte název vlastnosti');
-      return;
-    }
-
-    if (newFieldType === 'single_select' && newOptionChips.length === 0) {
-      if (newOptionChipInput.trim()) {
-        newOptionChips.push(newOptionChipInput.trim());
-      } else {
-        setNewFieldError('Přidejte alespoň jednu možnost výběru');
-        return;
+    setTimeout(() => {
+      const el = document.getElementById(`event-field-row-${newField.id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const input = el.querySelector('input, select, textarea') as HTMLElement | null;
+        if (input) input.focus();
       }
-    }
+    }, 120);
 
-    try {
-      const now = new Date().toISOString();
-      const fieldId = crypto.randomUUID();
-      const key = newFieldName
-        .trim()
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9_]/g, '_')
-        .slice(0, 32);
-
-      let config: { options?: SelectOption[] } = {};
-      if (newFieldType === 'single_select') {
-        config = {
-          options: newOptionChips.map((label) => ({
-            id: crypto.randomUUID(),
-            label,
-          })),
-        };
-      }
-
-      const assignedEventTypes =
-        newFieldScope === 'current'
-          ? [eventType.trim() || 'Servis']
-          : [];
-
-      const newField: FieldDefinition = {
-        id: fieldId,
-        collection_id: collectionId,
-        target: 'EVENT',
-        key: key || 'event_field_' + Date.now(),
-        name: newFieldName.trim(),
-        data_type: newFieldType,
-        unit: newFieldType === 'number' && newFieldUnit.trim() ? newFieldUnit.trim() : null,
-        event_types: assignedEventTypes,
-        is_required: newFieldRequired,
-        is_archived: false,
-        display_order: fieldDefinitions.length + 1,
-        config,
-        validation_rules: {},
-        created_at: now,
-        updated_at: now,
-      };
-
-      await db.field_definitions.add(newField);
-
-      // Reset sub-form
-      setNewFieldName('');
-      setNewFieldType('text');
-      setNewFieldUnit('');
-      setNewFieldRequired(false);
-      setNewOptionChips([]);
-      setNewOptionChipInput('');
-      setNewFieldError(null);
-      setIsAddingField(false);
-    } catch (err: any) {
-      setNewFieldError(err?.message || 'Chyba při vytváření vlastnosti události');
-    }
+    setTimeout(() => {
+      setHighlightedFieldId((prev) => (prev === newField.id ? null : prev));
+    }, 2500);
   };
 
   const validate = () => {
@@ -324,15 +331,33 @@ export const EventModal: React.FC<EventModalProps> = ({
           await db.attachments.add(att);
         }
 
+        const isReminderChanged =
+          reminderEnabled !== initialReminderState.enabled ||
+          reminderDaysBefore !== initialReminderState.daysBefore;
+
+        let reminderToSave: ReminderConfig | undefined;
+        if (isReminderChanged) {
+          reminderToSave = {
+            enabled: reminderEnabled,
+            days_before: reminderDaysBefore,
+          };
+        } else if (initialReminderState.hadExplicit && eventToEdit?.reminder) {
+          reminderToSave = eventToEdit.reminder;
+        }
+
         if (eventToEdit) {
-          await db.events.update(eventToEdit.id, {
+          const updateData: Partial<ItemEvent> = {
             event_type: eventType.trim() || 'Událost',
             title: title.trim(),
             event_date: eventDate.trim(), // Stored strictly as YYYY-MM-DD
             event_time: eventTime.trim() ? eventTime.trim() : null,
             data: cleanedData,
             updated_at: now,
-          });
+          };
+          if (reminderToSave !== undefined) {
+            updateData.reminder = reminderToSave;
+          }
+          await db.events.update(eventToEdit.id, updateData);
         } else {
           const newEvent: ItemEvent = {
             id: targetEventId,
@@ -341,6 +366,7 @@ export const EventModal: React.FC<EventModalProps> = ({
             title: title.trim(),
             event_date: eventDate.trim(), // Stored strictly as YYYY-MM-DD
             event_time: eventTime.trim() ? eventTime.trim() : null,
+            ...(reminderToSave !== undefined ? { reminder: reminderToSave } : {}),
             data: cleanedData,
             created_at: now,
             updated_at: now,
@@ -486,6 +512,25 @@ export const EventModal: React.FC<EventModalProps> = ({
               </div>
             </div>
 
+            {/* Reminder Row */}
+            <div className="pt-2 pb-1 border-t border-slate-100">
+              {isPastEvent ? (
+                <div className="flex items-center gap-1.5 py-1 text-xs text-slate-400 italic">
+                  <BellOff className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <span>Minulá událost: bez upozornění</span>
+                </div>
+              ) : (
+                <ReminderConfigEditor
+                  compact
+                  enabled={reminderEnabled}
+                  daysBefore={reminderDaysBefore}
+                  onToggle={setReminderEnabled}
+                  onChangeDaysBefore={setReminderDaysBefore}
+                  label="Upozornit na termín události"
+                />
+              )}
+            </div>
+
             {/* Custom EVENT Fields Section */}
             <div className="pt-3 border-t border-slate-100 space-y-3.5">
               <div className="flex items-center justify-between">
@@ -493,216 +538,15 @@ export const EventModal: React.FC<EventModalProps> = ({
                   Vlastnosti události ({visibleEventFields.length})
                 </span>
 
-                {!isAddingField && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsAddingField(true);
-                      setNewFieldError(null);
-                      setNewFieldScope('current');
-                    }}
-                    className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-                    <span>+ Přidat vlastnost události</span>
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setIsAddingField(true)}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>+ Přidat vlastnost události</span>
+                </button>
               </div>
-
-              {/* Inline Sub-dialog to Add EVENT Field */}
-              {isAddingField && (
-                <div className="p-4 bg-indigo-50/70 border border-indigo-200/80 rounded-2xl space-y-3.5 animate-in fade-in zoom-in-95">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Sliders className="w-4 h-4 text-indigo-600" />
-                      <h4 className="text-xs font-bold text-indigo-950 uppercase tracking-wider">
-                        Nová vlastnost pro událost
-                      </h4>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsAddingField(false)}
-                      className="p-1 text-slate-400 hover:text-slate-600 rounded-md cursor-pointer"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  {newFieldError && (
-                    <div className="p-2 text-xs text-red-700 bg-red-100/70 rounded-lg">
-                      {newFieldError}
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Název vlastnosti <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        autoFocus
-                        placeholder="Např. Cena servisu, Provedl servis..."
-                        value={newFieldName}
-                        onChange={(e) => setNewFieldName(e.target.value)}
-                        className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-indigo-500 outline-none bg-white"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Typ dat <span className="text-red-500">*</span>
-                      </label>
-                      <select
-                        value={newFieldType}
-                        onChange={(e) =>
-                          setNewFieldType(e.target.value as FieldDataType)
-                        }
-                        className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-indigo-500 outline-none bg-white"
-                      >
-                        {CREATABLE_FIELD_TYPES.map((t) => (
-                          <option key={t} value={t}>
-                            {FIELD_DATA_TYPE_LABELS[t]}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Number Unit */}
-                  {newFieldType === 'number' && (
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Jednotka (volitelně)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Např. Kč, km, hod, l..."
-                        value={newFieldUnit}
-                        onChange={(e) => setNewFieldUnit(e.target.value)}
-                        className="w-full sm:w-1/2 px-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-indigo-500 outline-none bg-white"
-                      />
-                    </div>
-                  )}
-
-                  {/* Single Select chips */}
-                  {newFieldType === 'single_select' && (
-                    <div className="space-y-2 pt-1">
-                      <label className="block text-xs font-semibold text-slate-700">
-                        Možnosti výběru
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          placeholder="Zadejte možnost a stiskněte Enter..."
-                          value={newOptionChipInput}
-                          onChange={(e) => setNewOptionChipInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              handleAddOptionChip();
-                            }
-                          }}
-                          className="grow px-3 py-1.5 text-xs rounded-xl border border-slate-300 outline-none bg-white"
-                        />
-                        <button
-                          type="button"
-                          onClick={handleAddOptionChip}
-                          className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 rounded-xl"
-                        >
-                          Přidat
-                        </button>
-                      </div>
-
-                      {newOptionChips.length > 0 && (
-                        <div className="flex flex-wrap gap-1">
-                          {newOptionChips.map((c, idx) => (
-                            <span
-                              key={idx}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white border border-indigo-200 text-xs font-medium text-slate-800 shadow-2xs"
-                            >
-                              <span>{c}</span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setNewOptionChips(newOptionChips.filter((_, i) => i !== idx))
-                                }
-                                className="text-slate-400 hover:text-red-500"
-                              >
-                                <X className="w-3 h-3" />
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Scope choice */}
-                  <div className="p-2.5 bg-white rounded-xl border border-indigo-100 text-xs space-y-1.5">
-                    <span className="font-bold text-slate-800 block">Použít pro:</span>
-                    <div className="flex items-center gap-4">
-                      <label className="flex items-center gap-1.5 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="newFieldScope"
-                          checked={newFieldScope === 'all'}
-                          onChange={() => setNewFieldScope('all')}
-                          className="text-indigo-600"
-                        />
-                        <span>všechny typy událostí</span>
-                      </label>
-
-                      <label className="flex items-center gap-1.5 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="newFieldScope"
-                          checked={newFieldScope === 'current'}
-                          onChange={() => setNewFieldScope('current')}
-                          className="text-indigo-600"
-                        />
-                        <span>
-                          jen pro typ <strong>„{eventType.trim() || 'Aktuální typ'}“</strong>
-                        </span>
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="text-[11px] text-slate-500">
-                    💡 Vlastnost se přidá všem událostem v sekci <strong>{collectionName}</strong>.
-                  </div>
-
-                  {/* Actions */}
-                  <div className="flex items-center justify-between pt-1">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={newFieldRequired}
-                        onChange={(e) => setNewFieldRequired(e.target.checked)}
-                        className="rounded border-slate-300 text-indigo-600"
-                      />
-                      <span className="text-xs text-slate-700">Povinná hodnota</span>
-                    </label>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setIsAddingField(false)}
-                        className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-200/60 rounded-xl cursor-pointer"
-                      >
-                        Zrušit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleSaveNewField}
-                        className="px-3.5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs cursor-pointer"
-                      >
-                        Uložit vlastnost
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               {/* Render Visible Event Fields */}
               {visibleEventFields.length === 0 ? (
@@ -713,22 +557,54 @@ export const EventModal: React.FC<EventModalProps> = ({
                 visibleEventFields.map((field) => {
                   const val = dataValues[field.id] ?? '';
                   const fieldError = errors[field.id];
+                  const isHighlighted = highlightedFieldId === field.id;
 
                   return (
-                    <div key={field.id} className="space-y-1">
-                      <label className="flex items-center justify-between text-xs font-medium text-slate-700">
-                        <span>
+                    <div
+                      key={field.id}
+                      id={`event-field-row-${field.id}`}
+                      className={`space-y-1 p-2 rounded-xl transition-all duration-300 ${
+                        isHighlighted
+                          ? 'ring-2 ring-indigo-500 bg-indigo-50/70 shadow-xs'
+                          : ''
+                      }`}
+                    >
+                    <div className="flex items-center justify-between text-xs font-medium text-slate-700">
+                      <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                        <span className="truncate">
                           {field.name}
                           {field.is_required && (
-                            <span className="text-red-500 ml-1">*</span>
+                            <span className="text-red-500 ml-0.5">*</span>
                           )}
                         </span>
-                        {field.unit && (
-                          <span className="text-[11px] text-slate-500 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
-                            {field.unit}
-                          </span>
+
+                        {/* Reminder Quick Edit for date fields */}
+                        {field.data_type === 'date' && (
+                          <ReminderQuickPopover
+                            field={field}
+                            scopeNote="Platí pro všechny události"
+                            onOpenFieldEdit={(f) => setFieldToEdit(f)}
+                          />
                         )}
-                      </label>
+
+                        {/* Edit Property button */}
+                        <button
+                          type="button"
+                          onClick={() => setFieldToEdit(field)}
+                          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+                          title="Upravit vlastnost"
+                          aria-label="Upravit vlastnost"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                        </button>
+                      </div>
+
+                      {field.unit && (
+                        <span className="text-[11px] text-slate-500 font-semibold bg-slate-100 px-1.5 py-0.5 rounded shrink-0 ml-2">
+                          {field.unit}
+                        </span>
+                      )}
+                    </div>
 
                       {/* Text */}
                       {field.data_type === 'text' && (
@@ -953,6 +829,28 @@ export const EventModal: React.FC<EventModalProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Field Edit Modal (z-70, on top of EventModal z-60) */}
+      <FieldEditModal
+        isOpen={!!currentFieldToEdit}
+        onClose={() => setFieldToEdit(null)}
+        field={currentFieldToEdit}
+        collectionId={collectionId}
+        zIndex="z-70"
+        onSaved={handleFieldSaved}
+      />
+
+      {/* Field Create Modal (z-70, on top of EventModal z-60) */}
+      <FieldCreateModal
+        isOpen={isAddingField}
+        onClose={() => setIsAddingField(false)}
+        collectionId={collectionId}
+        collectionName={collectionName}
+        target="EVENT"
+        currentEventType={eventType}
+        existingFieldsCount={visibleEventFields.length}
+        onFieldCreated={handleFieldCreated}
+      />
     </div>
   );
 };

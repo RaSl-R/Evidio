@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FieldDefinition, FieldDataType, SelectOption } from '../types';
+import { FieldDefinition, FieldDataType, SelectOption, FieldConfig } from '../types';
 import { db } from '../db';
 import { FieldEditModal } from './FieldEditModal';
 import {
@@ -7,6 +7,7 @@ import {
   CREATABLE_FIELD_TYPES,
   getFieldTypeLabel,
 } from '../utils/fieldTypes';
+import { ReminderConfigEditor } from './ReminderConfigEditor';
 import {
   Sliders,
   Plus,
@@ -23,6 +24,7 @@ import {
   Package,
   History,
   Download,
+  Bell,
 } from 'lucide-react';
 
 interface FieldManagerModalProps {
@@ -51,6 +53,9 @@ export const FieldManagerModal: React.FC<FieldManagerModalProps> = ({
   const [newIsRequired, setNewIsRequired] = useState(false);
   const [newOptionChipInput, setNewOptionChipInput] = useState('');
   const [newOptionChips, setNewOptionChips] = useState<string[]>([]);
+  // Reminder config
+  const [newReminderEnabled, setNewReminderEnabled] = useState(false);
+  const [newReminderDaysBefore, setNewReminderDaysBefore] = useState(30);
   // EVENT types scope
   const [newEventScope, setNewEventScope] = useState<'all' | 'specific'>('all');
   const [newEventTypeInput, setNewEventTypeInput] = useState('');
@@ -125,13 +130,20 @@ export const FieldManagerModal: React.FC<FieldManagerModalProps> = ({
         .replace(/[^a-z0-9_]/g, '_')
         .slice(0, 32);
 
-      let config: { options?: SelectOption[] } = {};
+      let config: FieldConfig = {};
       if (newDataType === 'single_select') {
         config = {
           options: newOptionChips.map((label) => ({
             id: crypto.randomUUID(),
             label,
           })),
+        };
+      } else if (newDataType === 'date' && newReminderEnabled) {
+        config = {
+          reminder: {
+            enabled: true,
+            days_before: newReminderDaysBefore,
+          },
         };
       }
 
@@ -169,6 +181,8 @@ export const FieldManagerModal: React.FC<FieldManagerModalProps> = ({
       setNewIsRequired(false);
       setNewOptionChips([]);
       setNewOptionChipInput('');
+      setNewReminderEnabled(false);
+      setNewReminderDaysBefore(30);
       setNewEventScope('all');
       setNewEventTypes([]);
       setNewEventTypeInput('');
@@ -233,6 +247,17 @@ export const FieldManagerModal: React.FC<FieldManagerModalProps> = ({
               {field.is_required && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 font-medium">
                   Povinné
+                </span>
+              )}
+
+              {/* Date reminder bell badge */}
+              {field.data_type === 'date' && field.config?.reminder?.enabled && (
+                <span
+                  className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200/80 font-bold"
+                  title={`Upozornění na termín: ${field.config.reminder.days_before} dní předem`}
+                >
+                  <Bell className="w-2.5 h-2.5" />
+                  <span>{field.config.reminder.days_before} d</span>
                 </span>
               )}
 
@@ -538,6 +563,18 @@ export const FieldManagerModal: React.FC<FieldManagerModalProps> = ({
                       ))}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Date reminder config */}
+              {newDataType === 'date' && (
+                <div className="p-3 bg-white rounded-xl border border-indigo-100">
+                  <ReminderConfigEditor
+                    enabled={newReminderEnabled}
+                    daysBefore={newReminderDaysBefore}
+                    onToggle={setNewReminderEnabled}
+                    onChangeDaysBefore={setNewReminderDaysBefore}
+                  />
                 </div>
               )}
 

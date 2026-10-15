@@ -9,6 +9,7 @@ import {
   sanitizeConfigForTypeChange,
   DISALLOWED_TYPE_TRANSITION_REASON,
 } from '../utils/fieldTypes';
+import { ReminderConfigEditor } from './ReminderConfigEditor';
 import {
   X,
   Sliders,
@@ -27,6 +28,8 @@ interface FieldEditModalProps {
   onClose: () => void;
   field: FieldDefinition | null;
   collectionId: string;
+  zIndex?: string;
+  onSaved?: (fieldId: string, oldType: FieldDataType, newType: FieldDataType) => void;
 }
 
 export const FieldEditModal: React.FC<FieldEditModalProps> = ({
@@ -34,6 +37,8 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
   onClose,
   field,
   collectionId,
+  zIndex = 'z-70',
+  onSaved,
 }) => {
   // Form state
   const [name, setName] = useState('');
@@ -41,6 +46,10 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
   const [unit, setUnit] = useState('');
   const [eventTypes, setEventTypes] = useState<string[]>([]);
   const [eventTypeInput, setEventTypeInput] = useState('');
+
+  // Reminder state
+  const [reminderEnabled, setReminderEnabled] = useState(false);
+  const [reminderDaysBefore, setReminderDaysBefore] = useState(30);
 
   // Missing values warning
   const [missingRecordsCount, setMissingRecordsCount] = useState<number | null>(null);
@@ -75,6 +84,8 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
           : []
       );
       setTargetType(field.data_type);
+      setReminderEnabled(field.config?.reminder?.enabled ?? false);
+      setReminderDaysBefore(field.config?.reminder?.days_before ?? 30);
       setTypeConversionError(null);
       setTypeConversionFailingValues([]);
       setTypeConversionPreviewCount(null);
@@ -334,9 +345,15 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
           {
             ...field.config,
             ...(targetType === 'single_select' ? { options } : {}),
+            ...(targetType === 'date' && reminderEnabled
+              ? { reminder: { enabled: true, days_before: reminderDaysBefore } }
+              : {}),
           },
           targetType
         );
+        if (targetType === 'date' && !reminderEnabled) {
+          delete updatedConfig.reminder;
+        }
 
         // 3. Update field definition
         await db.field_definitions.update(field.id, {
@@ -348,6 +365,10 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
           config: updatedConfig,
           updated_at: now,
         });
+
+        if (onSaved) {
+          onSaved(field.id, field.data_type, targetType);
+        }
       });
 
       onClose();
@@ -362,7 +383,7 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
   const deprecatedOptions = options.filter((o) => o.is_deleted);
 
   return (
-    <div className="fixed inset-0 z-60 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+    <div className={`fixed inset-0 ${zIndex} overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4`}>
       <div className="relative w-full max-w-xl bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50/70 shrink-0">
@@ -459,6 +480,16 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
                   className="w-full sm:w-1/2 px-3.5 py-2 rounded-xl border border-slate-300 focus:border-indigo-500 outline-none text-sm bg-white"
                 />
               </div>
+            )}
+
+            {/* Reminder Config for date fields */}
+            {targetType === 'date' && (
+              <ReminderConfigEditor
+                enabled={reminderEnabled}
+                daysBefore={reminderDaysBefore}
+                onToggle={setReminderEnabled}
+                onChangeDaysBefore={setReminderDaysBefore}
+              />
             )}
 
             {/* Event Types filter (for EVENT target) */}
@@ -727,9 +758,9 @@ export const FieldEditModal: React.FC<FieldEditModalProps> = ({
         </form>
       </div>
 
-      {/* Confirmation Dialog for Option Deprecation (z-70) */}
+      {/* Confirmation Dialog for Option Deprecation (above modal: z-[80]) */}
       {optionToDelete && (
-        <div className="fixed inset-0 z-70 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[80] overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 space-y-4 animate-in fade-in zoom-in-95">
             <div className="flex items-center gap-2.5 text-amber-600">
               <AlertTriangle className="w-5 h-5 shrink-0" />

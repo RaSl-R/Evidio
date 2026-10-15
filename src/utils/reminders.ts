@@ -12,6 +12,7 @@ export interface ReminderItem {
   dueDate: string; // YYYY-MM-DD
   daysLeft: number;
   status: ReminderStatus;
+  eventId?: string;
 }
 
 /**
@@ -67,10 +68,97 @@ export function formatRelativeDays(daysLeft: number): string {
 }
 
 /**
+ * Formats event reminder label: "<event_type>: <title>" with event_time when present.
+ */
+export function formatEventReminderLabel(
+  eventType: string,
+  title: string,
+  eventTime?: string | null
+): string {
+  const timeStr = eventTime?.trim();
+  const base = `${eventType}: ${title}`;
+  return timeStr ? `${base} (${timeStr})` : base;
+}
+
+/**
+ * Computes event deadline reminders for events whose event_date is today or later.
+ * Pure function: never reads clock, uses provided todayStr (YYYY-MM-DD).
+ */
+export function computeEventReminders(
+  events: ItemEvent[],
+  items: Item[],
+  todayStr: string
+): ReminderItem[] {
+  const todayUtc = parseDateToUtc(todayStr);
+  if (todayUtc === null) return [];
+
+  const itemsById = new Map<string, Item>();
+  for (const item of items) {
+    itemsById.set(item.id, item);
+  }
+
+  const reminders: ReminderItem[] = [];
+
+  for (const event of events) {
+    // Missing means DEFAULT: enabled: true, 30 days
+    const reminderConfig = event.reminder ?? { enabled: true, days_before: 30 };
+    if (!reminderConfig.enabled) {
+      continue;
+    }
+
+    const dueUtc = parseDateToUtc(event.event_date);
+    if (dueUtc === null) continue;
+
+    // UTC day difference as in reminders.ts, no local Date math
+    const daysLeft = Math.round((dueUtc - todayUtc) / 86400000);
+
+    // Events in the past never produce a reminder
+    if (daysLeft < 0) {
+      continue;
+    }
+
+    const daysBefore = reminderConfig.days_before ?? 30;
+
+    // status: 0 -> "today", 1..days_before -> "soon", greater -> "later"
+    let status: ReminderStatus = 'later';
+    if (daysLeft === 0) {
+      status = 'today';
+    } else if (daysLeft >= 1 && daysLeft <= daysBefore) {
+      status = 'soon';
+    } else {
+      status = 'later';
+    }
+
+    const item = itemsById.get(event.item_id);
+    if (!item) continue;
+
+    const fieldName = formatEventReminderLabel(
+      event.event_type,
+      event.title,
+      event.event_time
+    );
+
+    reminders.push({
+      itemId: item.id,
+      collectionId: item.collection_id,
+      fieldId: event.id,
+      fieldName,
+      targetKind: 'EVENT',
+      dueDate: event.event_date,
+      daysLeft,
+      status,
+      eventId: event.id,
+    });
+  }
+
+  return reminders;
+}
+
+/**
  * Computes deadline reminders for date fields with active reminder config.
  * Pure function: never reads clock, uses provided todayStr (YYYY-MM-DD).
  */
-export function computeReminders(
+export function computeFieldReminders(
   fieldDefs: FieldDefinition[],
   items: Item[],
   events: ItemEvent[],
@@ -216,4 +304,19 @@ export function computeReminders(
   }
 
   return reminders;
+}
+
+/**
+ * Computes all deadline reminders (both date fields and events).
+ * Pure function: never reads clock, uses provided todayStr (YYYY-MM-DD).
+ */
+export function computeReminders(
+  fieldDefs: FieldDefinition[],
+  items: Item[],
+  events: ItemEvent[],
+  todayStr: string
+): ReminderItem[] {
+  const fieldReminders = computeFieldReminders(fieldDefs, items, events, todayStr);
+  const eventReminders = computeEventReminders(events, items, todayStr);
+  return [...fieldReminders, ...eventReminders];
 }

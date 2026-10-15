@@ -29,7 +29,9 @@ import {
   Upload,
   Loader2,
   AlertCircle,
+  Bell,
 } from 'lucide-react';
+import { ReminderItem, formatRelativeDays } from '../utils/reminders';
 
 interface ItemDetailModalProps {
   isOpen: boolean;
@@ -37,6 +39,9 @@ interface ItemDetailModalProps {
   item: Item | null;
   fields: FieldDefinition[];
   tags?: Tag[];
+  urgentReminder?: ReminderItem | null;
+  totalRemindersCount?: number;
+  itemReminders?: ReminderItem[];
   onEditItem: (item: Item) => void;
   onDeleteItem: (item: Item) => void;
   onOpenCreateEvent: (item: Item) => void;
@@ -49,6 +54,9 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   item,
   fields,
   tags = [],
+  urgentReminder,
+  totalRemindersCount,
+  itemReminders = [],
   onEditItem,
   onDeleteItem,
   onOpenCreateEvent,
@@ -132,6 +140,16 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
     }
     return map;
   }, [allEventDocuments]);
+
+  const itemRemindersMap = useMemo(() => {
+    const map = new Map<string, ReminderItem>();
+    if (itemReminders) {
+      for (const r of itemReminders) {
+        map.set(r.fieldId, r);
+      }
+    }
+    return map;
+  }, [itemReminders]);
 
   const itemTags = item ? tags.filter((t) => item.tag_ids?.includes(t.id)) : [];
 
@@ -261,10 +279,27 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
         formattedVal = formatDateLabel(String(val));
       }
 
+      const fieldReminder = itemRemindersMap.get(fieldId);
+
       entries.push(
         <span key={fieldId} className="inline-flex items-center gap-1.5 flex-wrap">
           <strong className="text-slate-600 font-medium">{field.name}:</strong>{' '}
           <span className="text-slate-900 font-semibold">{formattedVal}</span>
+          {fieldReminder && (
+            <span
+              className={`inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.2 rounded ${
+                fieldReminder.status === 'overdue' || fieldReminder.status === 'today'
+                  ? 'bg-red-100 text-red-800'
+                  : fieldReminder.status === 'soon'
+                  ? 'bg-amber-100 text-amber-800'
+                  : 'bg-indigo-100 text-indigo-800'
+              }`}
+              title={`Termín: ${fieldReminder.dueDate} (${formatRelativeDays(fieldReminder.daysLeft)})`}
+            >
+              <Bell className="w-2 h-2" />
+              <span>{formatRelativeDays(fieldReminder.daysLeft)}</span>
+            </span>
+          )}
           {field.is_archived && (
             <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-50 text-amber-700 border border-amber-200 font-bold">
               archivováno
@@ -546,6 +581,32 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                 })}
               </div>
             )}
+
+            {/* Urgent reminder chip in header */}
+            {urgentReminder && (
+              <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                    urgentReminder.status === 'overdue' || urgentReminder.status === 'today'
+                      ? 'bg-red-50 text-red-700 border-red-200'
+                      : urgentReminder.status === 'soon'
+                      ? 'bg-amber-50 text-amber-700 border-amber-200'
+                      : 'bg-slate-50 text-slate-700 border-slate-200'
+                  }`}
+                  title={`${urgentReminder.fieldName}: ${formatDateLabel(urgentReminder.dueDate)} (${formatRelativeDays(urgentReminder.daysLeft)})`}
+                >
+                  <Bell className="w-3 h-3 shrink-0" />
+                  <span>
+                    {urgentReminder.fieldName}: {formatRelativeDays(urgentReminder.daysLeft)}
+                  </span>
+                </span>
+                {totalRemindersCount && totalRemindersCount > 1 && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                    +{totalRemindersCount - 1}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -581,159 +642,6 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
 
         {/* Scrollable Content */}
         <div className="p-6 overflow-y-auto space-y-6 grow">
-          {/* Item Photos Gallery Box */}
-          <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <ImageIcon className="w-4 h-4 text-slate-500" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
-                  Fotografie ({photos.length} / 10)
-                </h3>
-              </div>
-
-              {photos.length < 10 && (
-                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-white hover:bg-indigo-50 border border-slate-200 shadow-2xs rounded-xl transition-colors cursor-pointer">
-                  {isProcessingPhotos ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Zpracovávám...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>Přidat fotky</span>
-                    </>
-                  )}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    disabled={isProcessingPhotos}
-                    onChange={handlePhotoFilesSelected}
-                    className="hidden"
-                  />
-                </label>
-              )}
-            </div>
-
-            {photoError && (
-              <div className="flex items-center gap-2 p-2.5 text-xs text-red-700 bg-red-50 rounded-xl border border-red-200">
-                <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
-                <span>{photoError}</span>
-              </div>
-            )}
-
-            {photos.length > 0 ? (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                {photos.map((photo, idx) => (
-                  <ItemPhotoThumbnail
-                    key={photo.id}
-                    id={photo.id}
-                    fileName={photo.file_name}
-                    blob={photo.blob}
-                    sizeBytes={photo.size_bytes}
-                    isMain={idx === 0}
-                    onSetMain={idx > 0 ? () => handleSetMainPhoto(photo.id) : undefined}
-                    onDelete={() => handleDeletePhoto(photo.id)}
-                    onClick={() => setFullscreenPhotoIndex(idx)}
-                  />
-                ))}
-              </div>
-            ) : (
-              <label className="flex flex-col items-center justify-center p-6 border-2 border-dashed border-slate-200 rounded-xl bg-white hover:bg-slate-50 transition-colors cursor-pointer text-slate-400 hover:text-slate-600">
-                <ImageIcon className="w-7 h-7 stroke-[1.5] mb-1.5 text-slate-300" />
-                <span className="text-xs font-semibold text-slate-600">
-                  Přidat fotografie k této položce
-                </span>
-                <span className="text-[11px] text-slate-400 mt-0.5">
-                  Až 10 fotografií · automatická optimalizace (max 1600 px)
-                </span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  disabled={isProcessingPhotos}
-                  onChange={handlePhotoFilesSelected}
-                  className="hidden"
-                />
-              </label>
-            )}
-          </div>
-
-          {/* Item Documents Section */}
-          <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <FileText className="w-4 h-4 text-red-500" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
-                  Dokumenty ({(itemDocuments?.length || 0)} / {MAX_DOCUMENTS_PER_TARGET})
-                </h3>
-              </div>
-
-              {(itemDocuments?.length || 0) < MAX_DOCUMENTS_PER_TARGET && (
-                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-white hover:bg-indigo-50 border border-slate-200 shadow-2xs rounded-xl transition-colors cursor-pointer">
-                  {isProcessingDocs ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Ukládám...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>Přidat dokument</span>
-                    </>
-                  )}
-                  <input
-                    type="file"
-                    accept="application/pdf"
-                    multiple
-                    disabled={isProcessingDocs}
-                    onChange={handleItemDocFilesSelected}
-                    className="hidden"
-                  />
-                </label>
-              )}
-            </div>
-
-            {docError && (
-              <div className="flex items-center gap-2 p-2.5 text-xs text-red-700 bg-red-50 rounded-xl border border-red-200">
-                <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
-                <span>{docError}</span>
-              </div>
-            )}
-
-            {itemDocuments && itemDocuments.length > 0 ? (
-              <div className="space-y-2">
-                {itemDocuments.map((doc) => (
-                  <DocumentItemRow
-                    key={doc.id}
-                    document={doc}
-                    onRename={(d) => setDocToRename(d)}
-                    onDelete={(d) => setDocToDelete(d)}
-                  />
-                ))}
-              </div>
-            ) : (
-              <label className="flex flex-col items-center justify-center p-6 border-2 border-dashed border-slate-200 rounded-xl bg-white hover:bg-slate-50 transition-colors cursor-pointer text-slate-400 hover:text-slate-600">
-                <FileText className="w-7 h-7 stroke-[1.5] mb-1.5 text-slate-300" />
-                <span className="text-xs font-semibold text-slate-600">
-                  Přidat PDF dokumenty k této položce
-                </span>
-                <span className="text-[11px] text-slate-400 mt-0.5">
-                  Až 20 dokumentů · max. 10 MB na soubor · pouze formát PDF
-                </span>
-                <input
-                  type="file"
-                  accept="application/pdf"
-                  multiple
-                  disabled={isProcessingDocs}
-                  onChange={handleItemDocFilesSelected}
-                  className="hidden"
-                />
-              </label>
-            )}
-          </div>
-
           {/* Custom Item Properties Box */}
           <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
             <div className="flex items-center justify-between">
@@ -749,15 +657,43 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
               {activeItemFields.map((field) => {
                 const val = item.data?.[field.id];
                 const formatted = formatFieldValue(field, val);
+                const fieldReminder = itemRemindersMap.get(field.id);
+                const isOverdueOrToday =
+                  fieldReminder &&
+                  (fieldReminder.status === 'overdue' || fieldReminder.status === 'today');
+                const isSoon = fieldReminder && fieldReminder.status === 'soon';
 
                 return (
                   <div
                     key={field.id}
-                    className="p-2.5 bg-white rounded-xl border border-slate-200/60 flex items-center justify-between gap-2 shadow-2xs"
+                    className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 shadow-2xs transition-colors ${
+                      isOverdueOrToday
+                        ? 'bg-red-50/50 border-red-300 ring-1 ring-red-200'
+                        : isSoon
+                        ? 'bg-amber-50/50 border-amber-300 ring-1 ring-amber-200'
+                        : 'bg-white border-slate-200/60'
+                    }`}
                   >
-                    <span className="text-xs text-slate-500 font-medium truncate">
-                      {field.name}
-                    </span>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-xs text-slate-600 font-medium truncate">
+                        {field.name}
+                      </span>
+                      {fieldReminder && (
+                        <span
+                          className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.2 rounded shrink-0 ${
+                            isOverdueOrToday
+                              ? 'bg-red-100 text-red-800'
+                              : isSoon
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-indigo-100 text-indigo-800'
+                          }`}
+                          title={`Termín: ${fieldReminder.dueDate} (${formatRelativeDays(fieldReminder.daysLeft)})`}
+                        >
+                          <Bell className="w-2.5 h-2.5" />
+                          <span>{formatRelativeDays(fieldReminder.daysLeft)}</span>
+                        </span>
+                      )}
+                    </div>
                     <div className="text-xs text-right truncate">
                       {formatted !== null ? (
                         formatted
@@ -958,6 +894,159 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+
+          {/* Item Photos Gallery Box */}
+          <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <ImageIcon className="w-4 h-4 text-slate-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                  Fotografie ({photos.length} / 10)
+                </h3>
+              </div>
+
+              {photos.length < 10 && (
+                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-white hover:bg-indigo-50 border border-slate-200 shadow-2xs rounded-xl transition-colors cursor-pointer">
+                  {isProcessingPhotos ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Zpracovávám...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Přidat fotky</span>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    disabled={isProcessingPhotos}
+                    onChange={handlePhotoFilesSelected}
+                    className="hidden"
+                  />
+                </label>
+              )}
+            </div>
+
+            {photoError && (
+              <div className="flex items-center gap-2 p-2.5 text-xs text-red-700 bg-red-50 rounded-xl border border-red-200">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                <span>{photoError}</span>
+              </div>
+            )}
+
+            {photos.length > 0 ? (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {photos.map((photo, idx) => (
+                  <ItemPhotoThumbnail
+                    key={photo.id}
+                    id={photo.id}
+                    fileName={photo.file_name}
+                    blob={photo.blob}
+                    sizeBytes={photo.size_bytes}
+                    isMain={idx === 0}
+                    onSetMain={idx > 0 ? () => handleSetMainPhoto(photo.id) : undefined}
+                    onDelete={() => handleDeletePhoto(photo.id)}
+                    onClick={() => setFullscreenPhotoIndex(idx)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <label className="flex flex-col items-center justify-center p-6 border-2 border-dashed border-slate-200 rounded-xl bg-white hover:bg-slate-50 transition-colors cursor-pointer text-slate-400 hover:text-slate-600">
+                <ImageIcon className="w-7 h-7 stroke-[1.5] mb-1.5 text-slate-300" />
+                <span className="text-xs font-semibold text-slate-600">
+                  Přidat fotografie k této položce
+                </span>
+                <span className="text-[11px] text-slate-400 mt-0.5">
+                  Až 10 fotografií · automatická optimalizace (max 1600 px)
+                </span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  disabled={isProcessingPhotos}
+                  onChange={handlePhotoFilesSelected}
+                  className="hidden"
+                />
+              </label>
+            )}
+          </div>
+
+          {/* Item Documents Section */}
+          <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <FileText className="w-4 h-4 text-red-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                  Dokumenty ({(itemDocuments?.length || 0)} / {MAX_DOCUMENTS_PER_TARGET})
+                </h3>
+              </div>
+
+              {(itemDocuments?.length || 0) < MAX_DOCUMENTS_PER_TARGET && (
+                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-white hover:bg-indigo-50 border border-slate-200 shadow-2xs rounded-xl transition-colors cursor-pointer">
+                  {isProcessingDocs ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Ukládám...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Přidat dokument</span>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    multiple
+                    disabled={isProcessingDocs}
+                    onChange={handleItemDocFilesSelected}
+                    className="hidden"
+                  />
+                </label>
+              )}
+            </div>
+
+            {docError && (
+              <div className="flex items-center gap-2 p-2.5 text-xs text-red-700 bg-red-50 rounded-xl border border-red-200">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                <span>{docError}</span>
+              </div>
+            )}
+
+            {itemDocuments && itemDocuments.length > 0 ? (
+              <div className="space-y-2">
+                {itemDocuments.map((doc) => (
+                  <DocumentItemRow
+                    key={doc.id}
+                    document={doc}
+                    onRename={(d) => setDocToRename(d)}
+                    onDelete={(d) => setDocToDelete(d)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <label className="flex flex-col items-center justify-center p-6 border-2 border-dashed border-slate-200 rounded-xl bg-white hover:bg-slate-50 transition-colors cursor-pointer text-slate-400 hover:text-slate-600">
+                <FileText className="w-7 h-7 stroke-[1.5] mb-1.5 text-slate-300" />
+                <span className="text-xs font-semibold text-slate-600">
+                  Přidat PDF dokumenty k této položce
+                </span>
+                <span className="text-[11px] text-slate-400 mt-0.5">
+                  Až 20 dokumentů · max. 10 MB na soubor · pouze formát PDF
+                </span>
+                <input
+                  type="file"
+                  accept="application/pdf"
+                  multiple
+                  disabled={isProcessingDocs}
+                  onChange={handleItemDocFilesSelected}
+                  className="hidden"
+                />
+              </label>
             )}
           </div>
         </div>

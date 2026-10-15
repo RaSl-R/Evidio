@@ -87,9 +87,10 @@ To ensure strict engineering focus and prevent implementing agents or developers
 │ - title: VARCHAR(255)            │    └───┤ - file_name: VARCHAR     │
 │ - event_date: DATE (YYYY-MM-DD)  │        │ - mime_type: VARCHAR     │
 │ - event_time: VARCHAR(8) | NULL  │        │ - size_bytes: BIGINT     │
-│ - data: JSON map                 │        │ - sort_order: INT        │
-│ - created_at: ISO8601 TIMESTAMPTZ│        │ - blob (IDB) / b64 (exp) │
-│ - updated_at: ISO8601 TIMESTAMPTZ│        │ - created_at: TIMESTAMPTZ│
+│ - reminder: JSONB | NULL         │        │ - sort_order: INT        │
+│ - data: JSON map                 │        │ - blob (IDB) / b64 (exp) │
+│ - created_at: ISO8601 TIMESTAMPTZ│        │ - created_at: TIMESTAMPTZ│
+│ - updated_at: ISO8601 TIMESTAMPTZ│        │ - updated_at: TIMESTAMPTZ│
 └──────────────────────────────────┘        │ - updated_at: TIMESTAMPTZ│
                                             └──────────────────────────┘
 ```
@@ -150,6 +151,7 @@ To ensure strict engineering focus and prevent implementing agents or developers
    * `title`: Short descriptive title (e.g. *"Výměna motorového oleje"*).
    * `event_date`: Strict ISO calendar date string (`YYYY-MM-DD`). No timezone offset.
    * `event_time`: Optional time string (`HH:mm`, 24-hour format) or `null`.
+   * `reminder`: Optional object `{ enabled: boolean, days_before: integer 1..365 }` (same shape as `ReminderConfig`). Missing means DEFAULT: enabled: true, 30 days. No Dexie schema change (not indexed).
    * `data`: JSON key-value map `{ [field_id]: value }` for field definitions matching `target = 'EVENT'`.
    * `created_at`, `updated_at`: ISO 8601 timestamps.
 
@@ -423,6 +425,7 @@ CREATE TABLE events (
     title VARCHAR(255) NOT NULL,
     event_date DATE NOT NULL,
     event_time VARCHAR(8), -- Optional 'HH:mm'
+    reminder JSONB, -- Optional reminder config { enabled: boolean, days_before: integer }
     data JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -570,6 +573,7 @@ If any error occurs during parsing or binary blob conversion, the transaction ro
 | **Attachment Link** | `event_id UUID` | `event_id` | `event_id` | `"event_id": null` or UUID | Consistent |
 | **Attachment Sort Order** | `sort_order INT NOT NULL DEFAULT 0` | `sort_order: number` (unindexed) | `sort_order: number` | `"sort_order": 0` | Consistent (v1 additive) |
 | **Deadline Reminder Config** | `config JSONB` | `config.reminder` | `config.reminder?: ReminderConfig` | `"reminder": { "enabled": true, "days_before": 30 }` | Consistent (v1 additive) |
+| **Event Reminder Config** | `reminder JSONB` | `reminder?: ReminderConfig` (unindexed) | `reminder?: ReminderConfig` | `"reminder": { "enabled": true, "days_before": 30 }` | Consistent (v1 additive) |
 | **Binary Storage** | `storage_path TEXT` | `blob: Blob` | `data_base64: string` | Base64 string payload | Consistent |
 
 ---
@@ -756,6 +760,10 @@ Package conforming to `format: "evidio_package"`, `version: 1`:
       "title": "Pravidelná servisní prohlídka (olej, filtry)",
       "event_date": "2025-08-14",
       "event_time": "08:30",
+      "reminder": {
+        "enabled": true,
+        "days_before": 30
+      },
       "data": {
         "8c35d971-118e-42b7-a3cf-7db4bc0c1965": 4200,
         "416ce595-6d60-4927-a06d-e4c6001d2d0b": 165000

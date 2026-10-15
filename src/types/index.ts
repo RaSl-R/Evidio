@@ -114,6 +114,7 @@ export interface ItemEvent {
   title: string;
   event_date: string; // YYYY-MM-DD
   event_time: string | null; // HH:mm
+  reminder?: ReminderConfig;
   data: Record<string, any>; // key is FieldDefinition.id
   created_at: string;
   updated_at: string;

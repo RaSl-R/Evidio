@@ -11,6 +11,7 @@ import {
   X,
   Database,
   ChevronDown,
+  Bell,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -25,6 +26,10 @@ interface NavbarProps {
   onOpenImport: () => void;
   onExportAll: () => void;
   lastBackupDate: string | null;
+  onOpenReminders: () => void;
+  remindersCount: number;
+  hasOverdueOrToday: boolean;
+  hasSoon: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -39,6 +44,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenImport,
   onExportAll,
   lastBackupDate,
+  onOpenReminders,
+  remindersCount,
+  hasOverdueOrToday,
+  hasSoon,
 }) => {
   const [isBackupDismissed, setIsBackupDismissed] = useState(false);
   const [isDataMenuOpen, setIsDataMenuOpen] = useState(false);
@@ -124,19 +133,50 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Right Header: "Záloha a data" Menu */}
-          <div className="relative shrink-0" ref={dataMenuRef}>
+          {/* Right Header Buttons */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {/* "Termíny" Button with Bell */}
             <button
               type="button"
-              onClick={() => setIsDataMenuOpen((prev) => !prev)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-700 border border-slate-200/70 text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
-              title="Záloha a data aplikace"
-              aria-label="Záloha a data"
+              onClick={onOpenReminders}
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-700 border border-slate-200/70 text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+              title="Blížící se termíny"
+              aria-label={
+                remindersCount > 0
+                  ? `Termíny: ${remindersCount} aktivních upozornění${
+                      hasOverdueOrToday ? ' (po termínu či dnes)' : ' (blíží se)'
+                    }`
+                  : 'Termíny: žádná aktivní upozornění'
+              }
             >
-              <Database className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-              <span>Záloha a data</span>
-              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isDataMenuOpen ? 'rotate-180' : ''}`} />
+              <Bell className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+              <span>Termíny</span>
+              {remindersCount > 0 && (
+                <span
+                  className={`inline-flex items-center justify-center min-w-4 px-1.5 py-0.2 rounded-full text-[10px] font-bold shrink-0 ${
+                    hasOverdueOrToday
+                      ? 'bg-red-600 text-white'
+                      : 'bg-amber-500 text-white'
+                  }`}
+                >
+                  {remindersCount}
+                </span>
+              )}
             </button>
+
+            {/* "Záloha a data" Menu */}
+            <div className="relative shrink-0" ref={dataMenuRef}>
+              <button
+                type="button"
+                onClick={() => setIsDataMenuOpen((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-700 border border-slate-200/70 text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
+                title="Záloha a data aplikace"
+                aria-label="Záloha a data"
+              >
+                <Database className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span>Záloha a data</span>
+                <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isDataMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
 
             {isDataMenuOpen && (
               <div className="absolute right-0 top-full mt-1.5 w-64 bg-white rounded-2xl shadow-xl border border-slate-200/80 p-2 z-50 animate-in fade-in zoom-in-95 duration-100">
@@ -201,6 +241,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </div>
         </div>
+      </div>
 
         {/* Backup Reminder (small dismissible note) */}
         {!isBackupDismissed && (

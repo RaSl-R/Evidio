@@ -27,7 +27,11 @@ import { StorageInfoModal } from './components/StorageInfoModal';
 import { ExportWarningModal } from './components/ExportWarningModal';
 import { ItemCard } from './components/ItemCard';
 import { ItemListItem } from './components/ItemListItem';
+import { RemindersOverviewModal } from './components/RemindersOverviewModal';
 import { EmptyState } from './components/EmptyState';
+
+import { useToday } from './hooks/useToday';
+import { useReminders } from './hooks/useReminders';
 
 import {
   Search,
@@ -80,6 +84,27 @@ export default function App() {
       localStorage.setItem('evidio_view_mode', mode);
     } catch {}
   };
+
+  // Sort order state ("default" | "name" | "updated_at" | "reminder"), remembered in localStorage
+  const [sortOrder, setSortOrder] = useState<'default' | 'name' | 'updated_at' | 'reminder'>(() => {
+    try {
+      const saved = localStorage.getItem('evidio_sort_order');
+      if (saved === 'name' || saved === 'updated_at' || saved === 'reminder') {
+        return saved;
+      }
+    } catch {}
+    return 'default';
+  });
+
+  const handleSortOrderChange = (mode: 'default' | 'name' | 'updated_at' | 'reminder') => {
+    setSortOrder(mode);
+    try {
+      localStorage.setItem('evidio_sort_order', mode);
+    } catch {}
+  };
+
+  // Reminders Overview modal state
+  const [isRemindersOpen, setIsRemindersOpen] = useState(false);
 
   // Modals state
   const [isCategoryManagerOpen, setIsCategoryManagerOpen] = useState(false);
@@ -327,6 +352,20 @@ export default function App() {
     [activeCollectionId]
   );
 
+  // All items across all collections (for global overview modal navigation and name resolution)
+  const allItems = useLiveQuery<Item[]>(() => db.items.toArray());
+
+  // Deadline Reminders hook (refreshed on visibilitychange & local midnight)
+  const todayStr = useToday();
+  const {
+    allReminders,
+    urgentCount,
+    hasOverdueOrToday,
+    hasSoon,
+    remindersByItemId,
+    mostUrgentReminderByItemId,
+  } = useReminders(todayStr);
+
   // Always keep currentDetailItem reactively synced with live items query
   const currentDetailItem = useMemo(() => {
     if (!selectedDetailItemId || !items) return null;
@@ -383,11 +422,11 @@ export default function App() {
     return Array.from(new Set(collectionEvents.map((e) => e.event_type))).filter(Boolean);
   }, [collectionEvents]);
 
-  // 4. Search and Tag filtering (Diacritics-insensitive, token-based, including events, tags, and document names)
+  // 4. Search and Tag filtering (Diacritics-insensitive, token-based, including events, tags, and document names) + Sorting
   const filteredItems = useMemo(() => {
     if (!items) return [];
 
-    return items.filter((item) => {
+    const result = items.filter((item) => {
       // Tag filter: item must have ALL selected tags (AND logic)
       if (selectedFilterTagIds.length > 0) {
         const itemTagIds = item.tag_ids || [];
@@ -407,7 +446,30 @@ export default function App() {
         attachmentsByItem.get(item.id) || []
       );
     });
-  }, [items, fieldDefinitions, searchQuery, eventsByItem, selectedFilterTagIds, collectionTags, attachmentsByItem]);
+
+    if (sortOrder === 'name') {
+      return [...result].sort((a, b) =>
+        a.name.localeCompare(b.name, 'cs', { sensitivity: 'base' })
+      );
+    } else if (sortOrder === 'updated_at') {
+      return [...result].sort((a, b) =>
+        b.updated_at.localeCompare(a.updated_at)
+      );
+    } else if (sortOrder === 'reminder') {
+      return [...result].sort((a, b) => {
+        const remA = mostUrgentReminderByItemId.get(a.id);
+        const remB = mostUrgentReminderByItemId.get(b.id);
+        if (remA && remB) {
+          return remA.daysLeft - remB.daysLeft;
+        }
+        if (remA) return -1;
+        if (remB) return 1;
+        return 0;
+      });
+    }
+
+    return result;
+  }, [items, fieldDefinitions, searchQuery, eventsByItem, selectedFilterTagIds, collectionTags, attachmentsByItem, sortOrder, mostUrgentReminderByItemId]);
 
   // Handlers
   const handleMoveCollection = async (collectionId: string, targetGroupId: string) => {
@@ -598,6 +660,10 @@ export default function App() {
         onOpenImport={() => setIsImportModalOpen(true)}
         onExportAll={handleExportAll}
         lastBackupDate={lastBackupDate}
+        onOpenReminders={() => setIsRemindersOpen(true)}
+        remindersCount={urgentCount}
+        hasOverdueOrToday={hasOverdueOrToday}
+        hasSoon={hasSoon}
       />
 
       {/* Export Notice Banner */}
@@ -749,8 +815,8 @@ export default function App() {
             {/* Search and Filter Controls */}
             {items && items.length > 0 && (
               <div className="space-y-3">
-                <div className="flex items-center gap-2 sm:gap-3">
-                  <div className="relative grow max-w-md min-w-0">
+                <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+                  <div className="relative grow max-w-md min-w-[200px]">
                     <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
                       type="text"
@@ -769,6 +835,21 @@ export default function App() {
                         <X className="w-3.5 h-3.5" />
                       </button>
                     )}
+                  </div>
+
+                  {/* Sort Select next to search box */}
+                  <div className="relative shrink-0">
+                    <select
+                      value={sortOrder}
+                      onChange={(e) => handleSortOrderChange(e.target.value as any)}
+                      className="px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-700 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 cursor-pointer shadow-2xs"
+                      aria-label="Řazení položek"
+                    >
+                      <option value="default">Výchozí řazení</option>
+                      <option value="name">Název</option>
+                      <option value="updated_at">Poslední úprava</option>
+                      <option value="reminder">Podle termínu</option>
+                    </select>
                   </div>
 
                   {/* Segmented Control "Karty | Seznam" */}
@@ -910,6 +991,8 @@ export default function App() {
                     events={eventsByItem.get(item.id) || []}
                     mainPhoto={mainPhotoByItem.get(item.id)}
                     tags={collectionTags || []}
+                    urgentReminder={mostUrgentReminderByItemId.get(item.id)}
+                    totalRemindersCount={remindersByItemId.get(item.id)?.length}
                     onOpenDetail={(it) => {
                       setSelectedDetailItemId(it.id);
                       setIsDetailModalOpen(true);
@@ -932,6 +1015,8 @@ export default function App() {
                     events={eventsByItem.get(item.id) || []}
                     mainPhoto={mainPhotoByItem.get(item.id)}
                     tags={collectionTags || []}
+                    urgentReminder={mostUrgentReminderByItemId.get(item.id)}
+                    totalRemindersCount={remindersByItemId.get(item.id)?.length}
                     onOpenDetail={(it) => {
                       setSelectedDetailItemId(it.id);
                       setIsDetailModalOpen(true);
@@ -1010,6 +1095,9 @@ export default function App() {
         item={currentDetailItem}
         fields={fieldDefinitions || []}
         tags={collectionTags || []}
+        urgentReminder={currentDetailItem ? mostUrgentReminderByItemId.get(currentDetailItem.id) : null}
+        totalRemindersCount={currentDetailItem ? remindersByItemId.get(currentDetailItem.id)?.length : 0}
+        itemReminders={currentDetailItem ? remindersByItemId.get(currentDetailItem.id) || [] : []}
         onEditItem={(it) => {
           setItemToEdit(it);
           setIsItemModalOpen(true);
@@ -1024,6 +1112,25 @@ export default function App() {
           setEventItemTarget(currentDetailItem);
           setEventToEdit(ev);
           setIsEventModalOpen(true);
+        }}
+      />
+
+      {/* Overview Dialog: Blížící se termíny (z-50) */}
+      <RemindersOverviewModal
+        isOpen={isRemindersOpen}
+        onClose={() => setIsRemindersOpen(false)}
+        reminders={allReminders}
+        items={allItems || []}
+        collections={collections || []}
+        collectionGroups={collectionGroups || []}
+        activeCollection={activeCollection}
+        onNavigateToItem={(item, col, group) => {
+          if (group && group.id !== activeGroupId) {
+            handleSelectGroup(group.id);
+          }
+          handleSelectCollection(col);
+          setSelectedDetailItemId(item.id);
+          setIsDetailModalOpen(true);
         }}
       />
 

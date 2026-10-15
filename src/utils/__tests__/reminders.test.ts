@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeReminders, formatRelativeDays } from '../reminders';
+import { computeReminders, computeEventReminders, formatEventReminderLabel, formatRelativeDays } from '../reminders';
 import { sanitizeConfigForTypeChange } from '../fieldTypes';
 import { prepareImportCopy, prepareImportRestore } from '../import';
 import { buildEvidioPackage } from '../export';
@@ -520,6 +520,288 @@ describe('Deadline Reminders Unit Tests', () => {
 
       const reminders = computeReminders([fieldDef], [item], [], '2026-02-01');
       expect(reminders).toHaveLength(0);
+    });
+  });
+
+  describe('13. Event Reminders', () => {
+    const testItem: Item = {
+      id: dummyItemId,
+      collection_id: dummyColId,
+      item_type_id: null,
+      name: 'Škoda Octavia',
+      tag_ids: [],
+      data: {},
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    };
+
+    it('event in 2 days with time produces reminder with correct daysLeft, status soon, and label with time', () => {
+      const event: ItemEvent = {
+        id: 'event-2-days',
+        item_id: dummyItemId,
+        event_type: 'Servis',
+        title: 'Výměna motorového oleje',
+        event_date: '2026-04-12',
+        event_time: '14:30',
+        reminder: { enabled: true, days_before: 30 },
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const reminders = computeEventReminders([event], [testItem], '2026-04-10');
+      expect(reminders).toHaveLength(1);
+      expect(reminders[0].daysLeft).toBe(2);
+      expect(reminders[0].status).toBe('soon');
+      expect(reminders[0].fieldName).toBe('Servis: Výměna motorového oleje (14:30)');
+      expect(reminders[0].dueDate).toBe('2026-04-12');
+      expect(reminders[0].targetKind).toBe('EVENT');
+      expect(reminders[0].fieldId).toBe('event-2-days');
+      expect(reminders[0].eventId).toBe('event-2-days');
+    });
+
+    it('today event produces reminder with daysLeft 0 and status today', () => {
+      const event: ItemEvent = {
+        id: 'event-today',
+        item_id: dummyItemId,
+        event_type: 'STK',
+        title: 'Pravidelná technická kontrola',
+        event_date: '2026-04-10',
+        event_time: null,
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const reminders = computeEventReminders([event], [testItem], '2026-04-10');
+      expect(reminders).toHaveLength(1);
+      expect(reminders[0].daysLeft).toBe(0);
+      expect(reminders[0].status).toBe('today');
+      expect(reminders[0].fieldName).toBe('STK: Pravidelná technická kontrola');
+    });
+
+    it('yesterday event is strictly excluded (past events never produce reminders)', () => {
+      const event: ItemEvent = {
+        id: 'event-yesterday',
+        item_id: dummyItemId,
+        event_type: 'Kontrola',
+        title: 'Včerejší úkon',
+        event_date: '2026-04-09',
+        event_time: '08:00',
+        reminder: { enabled: true, days_before: 30 },
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const reminders = computeEventReminders([event], [testItem], '2026-04-10');
+      expect(reminders).toHaveLength(0);
+    });
+
+    it('handles boundary days_before and +1 correctly', () => {
+      const eventBoundary: ItemEvent = {
+        id: 'event-boundary',
+        item_id: dummyItemId,
+        event_type: 'Servis',
+        title: 'Servis přesně v limitu',
+        event_date: '2026-04-20', // exactly 10 days
+        event_time: null,
+        reminder: { enabled: true, days_before: 10 },
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const eventPlusOne: ItemEvent = {
+        id: 'event-plus-one',
+        item_id: dummyItemId,
+        event_type: 'Servis',
+        title: 'Servis jeden den nad limit',
+        event_date: '2026-04-21', // 11 days (10 + 1)
+        event_time: null,
+        reminder: { enabled: true, days_before: 10 },
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const reminders = computeEventReminders([eventBoundary, eventPlusOne], [testItem], '2026-04-10');
+      expect(reminders).toHaveLength(2);
+
+      const rBoundary = reminders.find((r) => r.fieldId === 'event-boundary')!;
+      expect(rBoundary.daysLeft).toBe(10);
+      expect(rBoundary.status).toBe('soon');
+
+      const rPlusOne = reminders.find((r) => r.fieldId === 'event-plus-one')!;
+      expect(rPlusOne.daysLeft).toBe(11);
+      expect(rPlusOne.status).toBe('later');
+    });
+
+    it('disabled event (enabled = false) produces no reminder', () => {
+      const event: ItemEvent = {
+        id: 'event-disabled',
+        item_id: dummyItemId,
+        event_type: 'Přezutí',
+        title: 'Přezutí pneumatik',
+        event_date: '2026-04-15',
+        event_time: null,
+        reminder: { enabled: false, days_before: 30 },
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const reminders = computeEventReminders([event], [testItem], '2026-04-10');
+      expect(reminders).toHaveLength(0);
+    });
+
+    it('event without reminder property defaults to enabled with 30 days', () => {
+      // Event at exactly 30 days
+      const eventAt30: ItemEvent = {
+        id: 'event-default-30',
+        item_id: dummyItemId,
+        event_type: 'Revize',
+        title: 'Roční revize',
+        event_date: '2026-05-10', // 30 days from 2026-04-10
+        event_time: null,
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      // Event at 31 days
+      const eventAt31: ItemEvent = {
+        id: 'event-default-31',
+        item_id: dummyItemId,
+        event_type: 'Revize',
+        title: 'Roční revize vzdálená',
+        event_date: '2026-05-11', // 31 days from 2026-04-10
+        event_time: null,
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const reminders = computeEventReminders([eventAt30, eventAt31], [testItem], '2026-04-10');
+      expect(reminders).toHaveLength(2);
+
+      const r30 = reminders.find((r) => r.fieldId === 'event-default-30')!;
+      expect(r30.daysLeft).toBe(30);
+      expect(r30.status).toBe('soon');
+
+      const r31 = reminders.find((r) => r.fieldId === 'event-default-31')!;
+      expect(r31.daysLeft).toBe(31);
+      expect(r31.status).toBe('later');
+    });
+
+    it('computes daysLeft accurately across month and year boundaries', () => {
+      // Year boundary: Dec 30, 2025 -> Jan 02, 2026
+      const eventYear: ItemEvent = {
+        id: 'event-year-boundary',
+        item_id: dummyItemId,
+        event_type: 'Plán',
+        title: 'Novoroční úkon',
+        event_date: '2026-01-02',
+        event_time: null,
+        data: {},
+        created_at: '2025-12-01T00:00:00Z',
+        updated_at: '2025-12-01T00:00:00Z',
+      };
+
+      const remindersYear = computeEventReminders([eventYear], [testItem], '2025-12-30');
+      expect(remindersYear).toHaveLength(1);
+      expect(remindersYear[0].daysLeft).toBe(3);
+      expect(remindersYear[0].status).toBe('soon');
+
+      // Month boundary: Jan 30, 2026 -> Feb 02, 2026
+      const eventMonth: ItemEvent = {
+        id: 'event-month-boundary',
+        item_id: dummyItemId,
+        event_type: 'Plán',
+        title: 'Únorový úkon',
+        event_date: '2026-02-02',
+        event_time: null,
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const remindersMonth = computeEventReminders([eventMonth], [testItem], '2026-01-30');
+      expect(remindersMonth).toHaveLength(1);
+      expect(remindersMonth[0].daysLeft).toBe(3);
+      expect(remindersMonth[0].status).toBe('soon');
+    });
+
+    it('computes daysLeft accurately across Czech daylight-saving change days', () => {
+      // Spring DST: Sunday 2026-03-29 (clock jumps 2:00 -> 3:00, 23h day)
+      // From 2026-03-28 to 2026-03-30 must be exactly 2 calendar days
+      const springEvent: ItemEvent = {
+        id: 'event-dst-spring',
+        item_id: dummyItemId,
+        event_type: 'Jaro',
+        title: 'Jarní servis',
+        event_date: '2026-03-30',
+        event_time: '10:00',
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const springReminders = computeEventReminders([springEvent], [testItem], '2026-03-28');
+      expect(springReminders).toHaveLength(1);
+      expect(springReminders[0].daysLeft).toBe(2);
+      expect(springReminders[0].status).toBe('soon');
+
+      // Autumn DST: Sunday 2026-10-25 (clock jumps 3:00 -> 2:00, 25h day)
+      // From 2026-10-24 to 2026-10-26 must be exactly 2 calendar days
+      const autumnEvent: ItemEvent = {
+        id: 'event-dst-autumn',
+        item_id: dummyItemId,
+        event_type: 'Podzim',
+        title: 'Podzimní servis',
+        event_date: '2026-10-26',
+        event_time: null,
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const autumnReminders = computeEventReminders([autumnEvent], [testItem], '2026-10-24');
+      expect(autumnReminders).toHaveLength(1);
+      expect(autumnReminders[0].daysLeft).toBe(2);
+      expect(autumnReminders[0].status).toBe('soon');
+    });
+
+    it('merges seamlessly with field reminders in computeReminders', () => {
+      const fieldDef = { ...baseItemFieldDef }; // due 2026-05-15, days_before: 30
+      const itemWithField: Item = {
+        ...testItem,
+        data: { [dummyFieldId]: '2026-05-15' },
+      };
+
+      const event: ItemEvent = {
+        id: 'event-merged',
+        item_id: dummyItemId,
+        event_type: 'Servis',
+        title: 'Výměna oleje',
+        event_date: '2026-05-01',
+        event_time: '09:00',
+        data: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const all = computeReminders([fieldDef], [itemWithField], [event], '2026-04-20');
+      expect(all).toHaveLength(2);
+
+      const fieldR = all.find((r) => r.fieldId === dummyFieldId)!;
+      expect(fieldR.targetKind).toBe('ITEM');
+      expect(fieldR.daysLeft).toBe(25);
+
+      const eventR = all.find((r) => r.fieldId === 'event-merged')!;
+      expect(eventR.targetKind).toBe('EVENT');
+      expect(eventR.daysLeft).toBe(11);
+      expect(eventR.fieldName).toBe('Servis: Výměna oleje (09:00)');
     });
   });
 });

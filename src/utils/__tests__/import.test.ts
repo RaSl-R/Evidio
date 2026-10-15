@@ -404,4 +404,93 @@ describe('Evidio Import Module', () => {
       expect(blob.size).toBe(12); // "Hello Evidio".length
     });
   });
+
+  describe('5. ItemEvent.reminder preservation across import modes', () => {
+    const pkgWithReminders: EvidioPackage = {
+      ...validSamplePackage,
+      events: [
+        {
+          id: 'ev-explicit-disabled',
+          item_id: dummyItemId,
+          event_type: 'Servis',
+          title: 'Servis bez upozornění',
+          event_date: '2026-11-01',
+          event_time: '10:00',
+          reminder: { enabled: false, days_before: 14 },
+          data: {},
+          created_at: '2026-10-11T10:00:00.000Z',
+          updated_at: '2026-10-11T10:00:00.000Z',
+        },
+        {
+          id: 'ev-explicit-enabled',
+          item_id: dummyItemId,
+          event_type: 'STK',
+          title: 'STK s 60 dny předem',
+          event_date: '2026-12-15',
+          event_time: '08:30',
+          reminder: { enabled: true, days_before: 60 },
+          data: {},
+          created_at: '2026-10-11T10:00:00.000Z',
+          updated_at: '2026-10-11T10:00:00.000Z',
+        },
+        {
+          id: 'ev-no-reminder-prop',
+          item_id: dummyItemId,
+          event_type: 'Kontrola',
+          title: 'Událost bez nastavení reminderu (výchozí)',
+          event_date: '2026-11-20',
+          event_time: null,
+          data: {},
+          created_at: '2026-10-11T10:00:00.000Z',
+          updated_at: '2026-10-11T10:00:00.000Z',
+        },
+      ],
+    };
+
+    it('Mode A (copy) preserves ItemEvent.reminder including events without the property', () => {
+      const prepared = prepareImportCopy(
+        pkgWithReminders,
+        [],
+        [],
+        dummyGroupId
+      );
+
+      expect(prepared.eventsToPut).toHaveLength(3);
+
+      const ev1 = prepared.eventsToPut.find((e) => e.title === 'Servis bez upozornění');
+      expect(ev1?.reminder).toEqual({ enabled: false, days_before: 14 });
+
+      const ev2 = prepared.eventsToPut.find((e) => e.title === 'STK s 60 dny předem');
+      expect(ev2?.reminder).toEqual({ enabled: true, days_before: 60 });
+
+      const ev3 = prepared.eventsToPut.find((e) => e.title === 'Událost bez nastavení reminderu (výchozí)');
+      expect(ev3?.reminder).toBeUndefined();
+    });
+
+    it('Mode B (restore) preserves ItemEvent.reminder including events without the property', () => {
+      const prepared = prepareImportRestore(pkgWithReminders, {
+        groups: [],
+        collections: validSamplePackage.collections,
+        itemTypes: [],
+        fieldDefs: validSamplePackage.field_definitions,
+        tags: [],
+        items: validSamplePackage.items,
+        events: [],
+        attachments: [],
+        defaultGroupId: dummyGroupId,
+      });
+
+      expect(prepared.eventsToPut).toHaveLength(3);
+
+      const ev1 = prepared.eventsToPut.find((e) => e.id === 'ev-explicit-disabled');
+      expect(ev1?.reminder).toEqual({ enabled: false, days_before: 14 });
+
+      const ev2 = prepared.eventsToPut.find((e) => e.id === 'ev-explicit-enabled');
+      expect(ev2?.reminder).toEqual({ enabled: true, days_before: 60 });
+
+      const ev3 = prepared.eventsToPut.find((e) => e.id === 'ev-no-reminder-prop');
+      expect(ev3?.reminder).toBeUndefined();
+    });
+  });
 });
+

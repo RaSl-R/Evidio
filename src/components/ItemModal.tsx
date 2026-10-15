@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Item, FieldDefinition, FieldDataType, SelectOption, Attachment, Tag } from '../types';
+import { Item, FieldDefinition, FieldDataType, SelectOption, Attachment, Tag, FieldConfig } from '../types';
 import { db } from '../db';
 import { FIELD_DATA_TYPE_LABELS, CREATABLE_FIELD_TYPES } from '../utils/fieldTypes';
 import { processImageFile } from '../utils/image';
 import { TAG_PALETTE, findMatchingTag, getTagColorOption } from '../utils/tagColors';
 import { ItemPhotoThumbnail } from './ItemPhotoThumbnail';
+import { ReminderQuickPopover } from './ReminderQuickPopover';
+import { FieldEditModal } from './FieldEditModal';
+import { FieldCreateModal } from './FieldCreateModal';
 import {
   X,
   PackagePlus,
@@ -24,6 +27,7 @@ import {
   Loader2,
   AlertCircle,
   Tags,
+  Edit2,
 } from 'lucide-react';
 
 interface StagedPhoto {
@@ -76,20 +80,51 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     [collectionId]
   ) || [];
 
-  // Sub-dialog state: Adding new field directly from item form
+  // Sub-dialog state: Adding new field via FieldCreateModal
   const [isAddingField, setIsAddingField] = useState(false);
-  const [newFieldName, setNewFieldName] = useState('');
-  const [newFieldType, setNewFieldType] = useState<FieldDataType>('text');
-  const [newFieldUnit, setNewFieldUnit] = useState('');
-  const [newFieldRequired, setNewFieldRequired] = useState(false);
-  const [newSelectOptionInput, setNewSelectOptionInput] = useState('');
-  const [newSelectOptions, setNewSelectOptions] = useState<string[]>([]);
-  const [newFieldError, setNewFieldError] = useState<string | null>(null);
+  const [highlightedFieldId, setHighlightedFieldId] = useState<string | null>(null);
+
+  // Editing custom field shortcut modal (FieldEditModal)
+  const [fieldToEdit, setFieldToEdit] = useState<FieldDefinition | null>(null);
+
+  // Live query for field definitions to keep labels and types fresh
+  const liveFieldDefinitions = useLiveQuery<FieldDefinition[]>(
+    () =>
+      collectionId
+        ? db.field_definitions.where('collection_id').equals(collectionId).sortBy('sort_order')
+        : Promise.resolve([]),
+    [collectionId]
+  );
+  const currentFieldDefs = liveFieldDefinitions || fieldDefinitions;
 
   // Filter only active item-level fields
-  const activeFields = fieldDefinitions.filter(
+  const activeFields = currentFieldDefs.filter(
     (f) => f.target === 'ITEM' && !f.is_archived
   );
+
+  const currentFieldToEdit = fieldToEdit
+    ? currentFieldDefs.find((f) => f.id === fieldToEdit.id) || fieldToEdit
+    : null;
+
+  const handleFieldSaved = async (fieldId: string, oldType: FieldDataType, newType: FieldDataType) => {
+    if (oldType !== newType) {
+      if (itemToEdit) {
+        // Query fresh record from DB (updated during safe type conversion)
+        const freshItem = await db.items.get(itemToEdit.id);
+        const storedVal = freshItem?.data?.[fieldId];
+        setDataValues((prev) => ({
+          ...prev,
+          [fieldId]: storedVal !== undefined ? storedVal : (newType === 'boolean' ? false : ''),
+        }));
+      } else {
+        // Newly created item in form
+        setDataValues((prev) => ({
+          ...prev,
+          [fieldId]: newType === 'boolean' ? false : '',
+        }));
+      }
+    }
+  };
 
   useEffect(() => {
     let isCancelled = false;
@@ -260,97 +295,26 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     }
   };
 
-  // Option chip management for single_select
-  const handleAddOptionChip = () => {
-    const trimmed = newSelectOptionInput.trim();
-    if (trimmed && !newSelectOptions.includes(trimmed)) {
-      setNewSelectOptions([...newSelectOptions, trimmed]);
-      setNewSelectOptionInput('');
+  const handleFieldCreated = (newField: FieldDefinition) => {
+    setHighlightedFieldId(newField.id);
+    if (newField.data_type === 'boolean') {
+      setDataValues((prev) => ({
+        ...prev,
+        [newField.id]: false,
+      }));
     }
-  };
-
-  const handleOptionKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      handleAddOptionChip();
-    }
-  };
-
-  const handleRemoveOptionChip = (indexToRemove: number) => {
-    setNewSelectOptions(newSelectOptions.filter((_, idx) => idx !== indexToRemove));
-  };
-
-  // Create new field definition from item form
-  const handleSaveNewField = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newFieldName.trim()) {
-      setNewFieldError('Zadejte název vlastnosti');
-      return;
-    }
-
-    if (newFieldType === 'single_select' && newSelectOptions.length === 0) {
-      // Check if user typed something in input without pressing Enter
-      if (newSelectOptionInput.trim()) {
-        newSelectOptions.push(newSelectOptionInput.trim());
-      } else {
-        setNewFieldError('Přidejte alespoň jednu možnost výběru');
-        return;
+    setTimeout(() => {
+      const el = document.getElementById(`field-row-${newField.id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const input = el.querySelector('input, select, textarea') as HTMLElement | null;
+        if (input) input.focus();
       }
-    }
+    }, 120);
 
-    try {
-      const now = new Date().toISOString();
-      const fieldId = crypto.randomUUID();
-      const key = newFieldName
-        .trim()
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9_]/g, '_')
-        .slice(0, 32);
-
-      let config: { options?: SelectOption[] } = {};
-      if (newFieldType === 'single_select') {
-        config = {
-          options: newSelectOptions.map((label) => ({
-            id: crypto.randomUUID(),
-            label,
-          })),
-        };
-      }
-
-      const newField: FieldDefinition = {
-        id: fieldId,
-        collection_id: collectionId,
-        target: 'ITEM',
-        key: key || 'field_' + Date.now(),
-        name: newFieldName.trim(),
-        data_type: newFieldType,
-        unit: newFieldType === 'number' && newFieldUnit.trim() ? newFieldUnit.trim() : null,
-        event_types: [],
-        is_required: newFieldRequired,
-        is_archived: false,
-        display_order: fieldDefinitions.length + 1,
-        config,
-        validation_rules: {},
-        created_at: now,
-        updated_at: now,
-      };
-
-      await db.field_definitions.add(newField);
-
-      // Reset sub-form
-      setNewFieldName('');
-      setNewFieldType('text');
-      setNewFieldUnit('');
-      setNewFieldRequired(false);
-      setNewSelectOptions([]);
-      setNewSelectOptionInput('');
-      setNewFieldError(null);
-      setIsAddingField(false);
-    } catch (err: any) {
-      setNewFieldError(err?.message || 'Chyba při vytváření vlastnosti');
-    }
+    setTimeout(() => {
+      setHighlightedFieldId((prev) => (prev === newField.id ? null : prev));
+    }, 2500);
   };
 
   const validate = () => {
@@ -709,206 +673,69 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                   Vlastnosti položky ({activeFields.length})
                 </span>
 
-                {/* Clearly visible trigger to add a property from this item form */}
-                {!isAddingField && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsAddingField(true);
-                      setNewFieldError(null);
-                    }}
-                    className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-                    <span>+ Přidat vlastnost (např. Palivo)</span>
-                  </button>
-                )}
+                {/* Trigger to open separate FieldCreateModal dialog */}
+                <button
+                  type="button"
+                  onClick={() => setIsAddingField(true)}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>+ Přidat vlastnost</span>
+                </button>
               </div>
-
-              {/* Compact Inline Property Definition Dialog */}
-              {isAddingField && (
-                <div className="p-4 bg-indigo-50/70 border border-indigo-200/80 rounded-2xl space-y-3.5 animate-in fade-in zoom-in-95 duration-150">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Sliders className="w-4 h-4 text-indigo-600" />
-                      <h4 className="text-xs font-bold text-indigo-950 uppercase tracking-wider">
-                        Definovat novou vlastnost
-                      </h4>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsAddingField(false)}
-                      className="p-1 text-slate-400 hover:text-slate-600 rounded-md"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  {newFieldError && (
-                    <div className="p-2 text-xs text-red-700 bg-red-100/70 rounded-lg">
-                      {newFieldError}
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Název vlastnosti <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        autoFocus
-                        placeholder="Např. Palivo, Barva, Převodovka..."
-                        value={newFieldName}
-                        onChange={(e) => setNewFieldName(e.target.value)}
-                        className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-indigo-500 outline-none bg-white"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Typ dat <span className="text-red-500">*</span>
-                      </label>
-                      <select
-                        value={newFieldType}
-                        onChange={(e) =>
-                          setNewFieldType(e.target.value as FieldDataType)
-                        }
-                        className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-indigo-500 outline-none bg-white"
-                      >
-                        {CREATABLE_FIELD_TYPES.map((t) => (
-                          <option key={t} value={t}>
-                            {FIELD_DATA_TYPE_LABELS[t]}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Number Unit */}
-                  {newFieldType === 'number' && (
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Jednotka (volitelně)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Např. km, l/100km, cm, kg, kW, Kč..."
-                        value={newFieldUnit}
-                        onChange={(e) => setNewFieldUnit(e.target.value)}
-                        className="w-full sm:w-1/2 px-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-indigo-500 outline-none bg-white"
-                      />
-                    </div>
-                  )}
-
-                  {/* Inline Option Chip Editor for single_select */}
-                  {newFieldType === 'single_select' && (
-                    <div className="space-y-2 pt-1">
-                      <label className="block text-xs font-semibold text-slate-700">
-                        Možnosti výběru (zadejte možnost a stiskněte Enter)
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          placeholder="Např. Benzín, Nafta, LPG, Elektro..."
-                          value={newSelectOptionInput}
-                          onChange={(e) => setNewSelectOptionInput(e.target.value)}
-                          onKeyDown={handleOptionKeyDown}
-                          className="grow px-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-indigo-500 outline-none bg-white"
-                        />
-                        <button
-                          type="button"
-                          onClick={handleAddOptionChip}
-                          className="px-3 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shrink-0"
-                        >
-                          Přidat
-                        </button>
-                      </div>
-
-                      {/* Removable chips */}
-                      {newSelectOptions.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 pt-1">
-                          {newSelectOptions.map((opt, idx) => (
-                            <span
-                              key={idx}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-indigo-200 text-xs font-medium text-slate-800 shadow-2xs"
-                            >
-                              <span>{opt}</span>
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveOptionChip(idx)}
-                                className="text-slate-400 hover:text-red-500 rounded-full"
-                                title="Odebrat možnost"
-                              >
-                                <X className="w-3 h-3" />
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Helper Text */}
-                  <div className="p-2.5 bg-white/80 rounded-xl border border-indigo-100 text-[11px] text-slate-600 leading-relaxed">
-                    💡 <strong>Upozornění:</strong> Vlastnost se přidá všem položkám v sekci{' '}
-                    <strong>{collectionName}</strong>.
-                  </div>
-
-                  {/* Sub-form Actions */}
-                  <div className="flex items-center justify-between pt-1">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={newFieldRequired}
-                        onChange={(e) => setNewFieldRequired(e.target.checked)}
-                        className="rounded border-slate-300 text-indigo-600"
-                      />
-                      <span className="text-xs text-slate-700">
-                        Povinná hodnota
-                      </span>
-                    </label>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setIsAddingField(false)}
-                        className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-200/60 rounded-xl"
-                      >
-                        Zrušit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleSaveNewField}
-                        className="px-3.5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs"
-                      >
-                        Uložit vlastnost
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               {/* Render dynamic field inputs */}
               {activeFields.map((field) => {
                 const val = dataValues[field.id] ?? '';
                 const fieldError = errors[field.id];
+                const isHighlighted = highlightedFieldId === field.id;
 
                 return (
-                  <div key={field.id} className="space-y-1">
-                    <label className="flex items-center justify-between text-xs font-medium text-slate-700">
-                      <span>
-                        {field.name}
-                        {field.is_required && (
-                          <span className="text-red-500 ml-1">*</span>
+                  <div
+                    key={field.id}
+                    id={`field-row-${field.id}`}
+                    className={`space-y-1 p-2 rounded-xl transition-all duration-300 ${
+                      isHighlighted
+                        ? 'ring-2 ring-indigo-500 bg-indigo-50/70 shadow-xs'
+                        : ''
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-xs font-medium text-slate-700">
+                      <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                        <span className="truncate">
+                          {field.name}
+                          {field.is_required && (
+                            <span className="text-red-500 ml-0.5">*</span>
+                          )}
+                        </span>
+
+                        {/* Reminder Quick Edit for date fields */}
+                        {field.data_type === 'date' && (
+                          <ReminderQuickPopover
+                            field={field}
+                            scopeNote={`Platí pro všechny položky v sekci ${collectionName}`}
+                            onOpenFieldEdit={(f) => setFieldToEdit(f)}
+                          />
                         )}
-                      </span>
+
+                        {/* Edit Property button */}
+                        <button
+                          type="button"
+                          onClick={() => setFieldToEdit(field)}
+                          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+                          title="Upravit vlastnost"
+                          aria-label="Upravit vlastnost"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                        </button>
+                      </div>
+
                       {field.unit && (
-                        <span className="text-[11px] text-slate-500 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
+                        <span className="text-[11px] text-slate-500 font-semibold bg-slate-100 px-1.5 py-0.5 rounded shrink-0 ml-2">
                           {field.unit}
                         </span>
                       )}
-                    </label>
+                    </div>
 
                     {/* Text */}
                     {field.data_type === 'text' && (
@@ -1035,6 +862,27 @@ export const ItemModal: React.FC<ItemModalProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Field Edit Modal (z-70, on top of ItemModal z-60) */}
+      <FieldEditModal
+        isOpen={!!currentFieldToEdit}
+        onClose={() => setFieldToEdit(null)}
+        field={currentFieldToEdit}
+        collectionId={collectionId}
+        zIndex="z-70"
+        onSaved={handleFieldSaved}
+      />
+
+      {/* Field Create Modal (z-70, on top of ItemModal z-60) */}
+      <FieldCreateModal
+        isOpen={isAddingField}
+        onClose={() => setIsAddingField(false)}
+        collectionId={collectionId}
+        collectionName={collectionName}
+        target="ITEM"
+        existingFieldsCount={activeFields.length}
+        onFieldCreated={handleFieldCreated}
+      />
     </div>
   );
 };

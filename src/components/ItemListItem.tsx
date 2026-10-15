@@ -1,10 +1,12 @@
 import React from 'react';
 import { Item, FieldDefinition, ItemEvent, Attachment, Tag } from '../types';
-import { Edit2, Trash2 } from 'lucide-react';
+import { Edit2, Trash2, Bell } from 'lucide-react';
 import { useAttachmentUrl } from '../hooks/useAttachmentUrl';
 import { getTagColorOption } from '../utils/tagColors';
+import { ReminderItem, formatRelativeDays } from '../utils/reminders';
 import {
   formatCompactFieldValue,
+  formatDateLabel,
   getEventCountText,
   sortEventsDesc,
 } from '../utils/itemHelpers';
@@ -15,6 +17,8 @@ interface ItemListItemProps {
   events?: ItemEvent[];
   mainPhoto?: Attachment | null;
   tags?: Tag[];
+  urgentReminder?: ReminderItem | null;
+  totalRemindersCount?: number;
   onOpenDetail: (item: Item) => void;
   onEdit: (item: Item) => void;
   onDelete: (item: Item) => void;
@@ -26,6 +30,8 @@ export const ItemListItem: React.FC<ItemListItemProps> = ({
   events = [],
   mainPhoto,
   tags = [],
+  urgentReminder,
+  totalRemindersCount,
   onOpenDetail,
   onEdit,
   onDelete,
@@ -64,10 +70,32 @@ export const ItemListItem: React.FC<ItemListItemProps> = ({
           />
         )}
 
-        {/* Mobile Layout (< md): 1 line name, 2nd line up to 2 values */}
+        {/* Mobile Layout (< md): 1 line name with reminder chip, 2nd line up to 2 values */}
         <div className="min-w-0 flex-1 md:hidden">
-          <div className="font-bold text-xs sm:text-sm text-slate-900 group-hover:text-indigo-600 transition-colors truncate">
-            {item.name}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="font-bold text-xs sm:text-sm text-slate-900 group-hover:text-indigo-600 transition-colors truncate">
+              {item.name}
+            </span>
+            {urgentReminder && (
+              <span
+                className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-md text-[9px] font-bold border shrink-0 ${
+                  urgentReminder.status === 'overdue' || urgentReminder.status === 'today'
+                    ? 'bg-red-50 text-red-700 border-red-200'
+                    : urgentReminder.status === 'soon'
+                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                    : 'bg-slate-50 text-slate-700 border-slate-200'
+                }`}
+                title={`${urgentReminder.fieldName}: ${formatRelativeDays(urgentReminder.daysLeft)}`}
+              >
+                <Bell className="w-2 h-2 shrink-0" />
+                <span className="truncate max-w-[120px]">
+                  {urgentReminder.fieldName}: {formatRelativeDays(urgentReminder.daysLeft)}
+                </span>
+                {totalRemindersCount && totalRemindersCount > 1 && (
+                  <span>+{totalRemindersCount - 1}</span>
+                )}
+              </span>
+            )}
           </div>
           <div className="text-[11px] text-slate-500 truncate flex items-center gap-1 mt-0.5">
             {displayedFields.length > 0 ? (
@@ -145,6 +173,35 @@ export const ItemListItem: React.FC<ItemListItemProps> = ({
                   title={`+${remainingTagCount} dalších štítků`}
                 >
                   +{remainingTagCount}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Urgent Reminder Status Chip on Desktop */}
+          {urgentReminder && (
+            <div className="flex items-center gap-1 shrink-0">
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border truncate max-w-[200px] ${
+                  urgentReminder.status === 'overdue' || urgentReminder.status === 'today'
+                    ? 'bg-red-50 text-red-700 border-red-200'
+                    : urgentReminder.status === 'soon'
+                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                    : 'bg-slate-50 text-slate-700 border-slate-200'
+                }`}
+                title={`${urgentReminder.fieldName}: ${formatDateLabel(urgentReminder.dueDate)} (${formatRelativeDays(urgentReminder.daysLeft)})`}
+              >
+                <Bell className="w-2.5 h-2.5 shrink-0" />
+                <span className="truncate">
+                  {urgentReminder.fieldName}: {formatRelativeDays(urgentReminder.daysLeft)}
+                </span>
+              </span>
+              {totalRemindersCount && totalRemindersCount > 1 && (
+                <span
+                  className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200"
+                  title={`+${totalRemindersCount - 1} dalších termínů`}
+                >
+                  +{totalRemindersCount - 1}
                 </span>
               )}
             </div>
