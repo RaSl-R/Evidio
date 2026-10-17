@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { Item, FieldDefinition, ItemEvent, Attachment, Tag } from '../types';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { Item, FieldDefinition, ItemEvent, Attachment, Tag, ItemDetailFocus } from '../types';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import { processImageFile } from '../utils/image';
@@ -42,6 +42,7 @@ interface ItemDetailModalProps {
   urgentReminder?: ReminderItem | null;
   totalRemindersCount?: number;
   itemReminders?: ReminderItem[];
+  focus?: ItemDetailFocus | null;
   onEditItem: (item: Item) => void;
   onDeleteItem: (item: Item) => void;
   onOpenCreateEvent: (item: Item) => void;
@@ -57,6 +58,7 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   urgentReminder,
   totalRemindersCount,
   itemReminders = [],
+  focus,
   onEditItem,
   onDeleteItem,
   onOpenCreateEvent,
@@ -67,6 +69,11 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   const [fullscreenPhotoIndex, setFullscreenPhotoIndex] = useState<number | null>(null);
   const [isProcessingPhotos, setIsProcessingPhotos] = useState(false);
   const [photoError, setPhotoError] = useState<string | null>(null);
+
+  // Focus scroll and highlight state
+  const [highlightedTargetId, setHighlightedTargetId] = useState<string | null>(null);
+  const highlightTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const prevFocusKeyRef = useRef<string | null>(null);
 
   // Documents state
   const [isProcessingDocs, setIsProcessingDocs] = useState(false);
@@ -152,6 +159,78 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   }, [itemReminders]);
 
   const itemTags = item ? tags.filter((t) => item.tag_ids?.includes(t.id)) : [];
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen || !item || !focus || rawEvents === undefined) {
+      if (!isOpen) {
+        prevFocusKeyRef.current = null;
+        setHighlightedTargetId(null);
+      }
+      return;
+    }
+
+    const focusKey = `${item.id}:${focus.section}:${focus.eventId || ''}:${focus.fieldId || ''}`;
+    if (prevFocusKeyRef.current === focusKey) {
+      return;
+    }
+    prevFocusKeyRef.current = focusKey;
+
+    if (focus.section === 'properties' && focus.fieldId) {
+      const isArchived = fields.some(
+        (f) =>
+          f.target === 'ITEM' &&
+          f.is_archived &&
+          f.id === focus.fieldId &&
+          item.data?.[f.id] !== undefined &&
+          item.data?.[f.id] !== null &&
+          item.data?.[f.id] !== ''
+      );
+      if (isArchived) {
+        setIsArchivedExpanded(true);
+      }
+    }
+
+    const targetId =
+      focus.section === 'events'
+        ? focus.eventId
+          ? `event-row-${focus.eventId}`
+          : 'detail-section-events'
+        : focus.fieldId
+        ? `property-row-${focus.fieldId}`
+        : 'detail-section-properties';
+
+    const performScrollAndHighlight = (retry: boolean) => {
+      const el = document.getElementById(targetId);
+      if (el) {
+        const prefersReducedMotion =
+          typeof window !== 'undefined' &&
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        el.scrollIntoView({
+          behavior: prefersReducedMotion ? 'auto' : 'smooth',
+          block: 'start',
+        });
+        setHighlightedTargetId(targetId);
+        if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+        highlightTimeoutRef.current = setTimeout(() => {
+          setHighlightedTargetId(null);
+        }, 2000);
+      } else if (retry) {
+        setTimeout(() => {
+          performScrollAndHighlight(false);
+        }, 100);
+      }
+    };
+
+    requestAnimationFrame(() => {
+      performScrollAndHighlight(true);
+    });
+  }, [isOpen, item, focus, rawEvents, fields]);
 
   if (!isOpen || !item) return null;
 
@@ -643,7 +722,14 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
         {/* Scrollable Content */}
         <div className="p-6 overflow-y-auto space-y-6 grow">
           {/* Custom Item Properties Box */}
-          <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3">
+          <div
+            id="detail-section-properties"
+            className={`bg-slate-50/70 rounded-2xl p-4 border border-slate-200/70 space-y-3 transition-all duration-300 ${
+              highlightedTargetId === 'detail-section-properties'
+                ? 'ring-2 ring-indigo-500 ring-offset-2'
+                : ''
+            }`}
+          >
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
                 Vlastnosti položky
@@ -662,12 +748,16 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                   fieldReminder &&
                   (fieldReminder.status === 'overdue' || fieldReminder.status === 'today');
                 const isSoon = fieldReminder && fieldReminder.status === 'soon';
+                const isHighlighted = highlightedTargetId === `property-row-${field.id}`;
 
                 return (
                   <div
                     key={field.id}
-                    className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 shadow-2xs transition-colors ${
-                      isOverdueOrToday
+                    id={`property-row-${field.id}`}
+                    className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 shadow-2xs transition-all duration-300 scroll-mt-6 ${
+                      isHighlighted
+                        ? 'ring-2 ring-indigo-500 ring-offset-2 bg-indigo-50/90 border-indigo-400'
+                        : isOverdueOrToday
                         ? 'bg-red-50/50 border-red-300 ring-1 ring-red-200'
                         : isSoon
                         ? 'bg-amber-50/50 border-amber-300 ring-1 ring-amber-200'
@@ -731,11 +821,17 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                   {archivedItemFieldsWithValues.map((field) => {
                     const val = item.data?.[field.id];
                     const formatted = formatFieldValue(field, val);
+                    const isHighlighted = highlightedTargetId === `property-row-${field.id}`;
 
                     return (
                       <div
                         key={field.id}
-                        className="p-2.5 bg-white rounded-xl border border-slate-200/70 flex items-center justify-between gap-2 shadow-2xs"
+                        id={`property-row-${field.id}`}
+                        className={`p-2.5 bg-white rounded-xl border flex items-center justify-between gap-2 shadow-2xs transition-all duration-300 scroll-mt-6 ${
+                          isHighlighted
+                            ? 'ring-2 ring-indigo-500 ring-offset-2 bg-indigo-50/90 border-indigo-400'
+                            : 'border-slate-200/70'
+                        }`}
                       >
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span className="text-xs text-slate-500 font-medium truncate">
@@ -757,7 +853,14 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
           )}
 
           {/* Timeline of Events */}
-          <div className="space-y-4 pt-1">
+          <div
+            id="detail-section-events"
+            className={`space-y-4 pt-1 transition-all duration-300 ${
+              highlightedTargetId === 'detail-section-events'
+                ? 'ring-2 ring-indigo-500 ring-offset-2 rounded-2xl p-2'
+                : ''
+            }`}
+          >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <History className="w-4 h-4 text-indigo-600" />
@@ -798,13 +901,25 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
             ) : (
               /* Vertical Timeline */
               <div className="relative pl-6 space-y-4 before:content-[''] before:absolute before:left-2.5 before:top-3 before:bottom-3 before:w-0.5 before:bg-indigo-100">
-                {sortedEvents.map((event) => (
-                  <div key={event.id} className="relative group">
-                    {/* Node Dot */}
-                    <div className="absolute -left-[19px] top-3.5 w-3 h-3 rounded-full bg-indigo-600 ring-4 ring-white" />
+                {sortedEvents.map((event) => {
+                  const isHighlighted = highlightedTargetId === `event-row-${event.id}`;
+                  return (
+                    <div
+                      key={event.id}
+                      id={`event-row-${event.id}`}
+                      className="relative group scroll-mt-6"
+                    >
+                      {/* Node Dot */}
+                      <div className="absolute -left-[19px] top-3.5 w-3 h-3 rounded-full bg-indigo-600 ring-4 ring-white" />
 
-                    {/* Timeline Card */}
-                    <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-2xs hover:shadow-xs transition-shadow">
+                      {/* Timeline Card */}
+                      <div
+                        className={`bg-white rounded-2xl border p-4 shadow-2xs hover:shadow-xs transition-all duration-300 ${
+                          isHighlighted
+                            ? 'border-indigo-400 ring-2 ring-indigo-500 ring-offset-2 bg-indigo-50/40'
+                            : 'border-slate-200/80'
+                        }`}
+                      >
                       <div className="flex items-start justify-between gap-3 mb-1.5">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100">
@@ -892,8 +1007,9 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                       })()}
                     </div>
                   </div>
-                ))}
-              </div>
+                );
+              })}
+            </div>
             )}
           </div>
 

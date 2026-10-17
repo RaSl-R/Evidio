@@ -1,4 +1,4 @@
-import { FieldDefinition, Item, ItemEvent } from '../types';
+import { FieldDefinition, Item, ItemEvent, ItemDetailFocus } from '../types';
 import { normalizeSearchText } from './search';
 
 export type ReminderStatus = 'overdue' | 'today' | 'soon' | 'later';
@@ -10,9 +10,86 @@ export interface ReminderItem {
   fieldName: string;
   targetKind: 'ITEM' | 'EVENT';
   dueDate: string; // YYYY-MM-DD
+  dueTime?: string | null; // HH:mm or null
   daysLeft: number;
   status: ReminderStatus;
   eventId?: string;
+}
+
+export interface ReminderChipsResult {
+  visibleReminders: ReminderItem[];
+  hiddenCount: number;
+  nextHiddenReminder: ReminderItem | null;
+  totalUrgentCount: number;
+}
+
+/**
+ * Deterministically compares two reminders by urgency:
+ * 1. daysLeft ascending (overdue first)
+ * 2. tie-break by time (earlier time first; timed before untimed)
+ * 3. tie-break by fieldName (Czech locale)
+ */
+export function compareRemindersByUrgency(a: ReminderItem, b: ReminderItem): number {
+  if (a.daysLeft !== b.daysLeft) {
+    return a.daysLeft - b.daysLeft;
+  }
+
+  const timeA = a.dueTime || '';
+  const timeB = b.dueTime || '';
+  if (timeA !== timeB) {
+    if (timeA && !timeB) return -1;
+    if (!timeA && timeB) return 1;
+    return timeA.localeCompare(timeB);
+  }
+
+  return a.fieldName.localeCompare(b.fieldName, 'cs');
+}
+
+/**
+ * Pure helper to select visible reminder chips for an item card/row:
+ * - Filters to status: overdue, today, soon (strictly excludes "later")
+ * - Sorts by daysLeft asc, tie-break by time, then by label
+ * - Slices up to maxVisible (default 2, narrow mode 1)
+ * - Returns visible chips, hidden count, and next hidden reminder (for +N focus target)
+ */
+export function selectItemReminderChips(
+  reminders: ReminderItem[],
+  maxVisible: number = 2
+): ReminderChipsResult {
+  const urgent = reminders.filter(
+    (r) => r.status === 'overdue' || r.status === 'today' || r.status === 'soon'
+  );
+
+  urgent.sort(compareRemindersByUrgency);
+
+  const visibleReminders = urgent.slice(0, maxVisible);
+  const hiddenReminders = urgent.slice(maxVisible);
+  const hiddenCount = hiddenReminders.length;
+  const nextHiddenReminder = hiddenReminders[0] || null;
+
+  return {
+    visibleReminders,
+    hiddenCount,
+    nextHiddenReminder,
+    totalUrgentCount: urgent.length,
+  };
+}
+
+/**
+ * Determines target section and IDs for ItemDetailModal focus from a reminder item.
+ */
+export function getReminderFocusTarget(reminder: ReminderItem): ItemDetailFocus {
+  if (reminder.targetKind === 'EVENT') {
+    return {
+      section: 'events',
+      eventId: reminder.eventId,
+    };
+  } else {
+    return {
+      section: 'properties',
+      fieldId: reminder.fieldId,
+    };
+  }
 }
 
 /**
@@ -145,6 +222,7 @@ export function computeEventReminders(
       fieldName,
       targetKind: 'EVENT',
       dueDate: event.event_date,
+      dueTime: event.event_time ?? null,
       daysLeft,
       status,
       eventId: event.id,
@@ -231,6 +309,7 @@ export function computeFieldReminders(
           fieldName: field.name,
           targetKind: 'ITEM',
           dueDate: dueDateStr,
+          dueTime: null,
           daysLeft,
           status,
         });
@@ -296,8 +375,10 @@ export function computeFieldReminders(
           fieldName: field.name,
           targetKind: 'EVENT',
           dueDate: dueDateStr,
+          dueTime: latestEvent.event_time ?? null,
           daysLeft,
           status,
+          eventId: latestEvent.id,
         });
       }
     }
@@ -319,4 +400,150 @@ export function computeReminders(
   const fieldReminders = computeFieldReminders(fieldDefs, items, events, todayStr);
   const eventReminders = computeEventReminders(events, items, todayStr);
   return [...fieldReminders, ...eventReminders];
+}
+
+export type DeadlineBarColorLevel = 'red' | 'orange' | 'yellow';
+
+export interface DeadlineBarSelectionResult {
+  shownReminders: ReminderItem[];
+  totalUrgentCount: number;
+  remainingCount: number;
+}
+
+/**
+ * Pure helper to select the 2 nearest reminders across all sections for the main deadline bar.
+ * - Filters strictly to status: 'overdue' | 'today' | 'soon'
+ * - Sorts deterministically with compareRemindersByUrgency
+ * - Slices first 2 items
+ * - Calculates remainingCount (total - 2, minimum 0)
+ */
+export function selectDeadlineBarReminders(
+  reminders: ReminderItem[]
+): DeadlineBarSelectionResult {
+  const urgent = reminders.filter(
+    (r) => r.status === 'overdue' || r.status === 'today' || r.status === 'soon'
+  );
+
+  urgent.sort(compareRemindersByUrgency);
+
+  const shownReminders = urgent.slice(0, 2);
+  const totalUrgentCount = urgent.length;
+  const remainingCount = Math.max(0, totalUrgentCount - 2);
+
+  return {
+    shownReminders,
+    totalUrgentCount,
+    remainingCount,
+  };
+}
+
+/**
+ * Determines color level ('red' | 'orange' | 'yellow') based on the most urgent shown reminder.
+ * - overdue or today (daysLeft <= 0 or status in ['overdue', 'today']) -> 'red'
+ * - daysLeft < 7 -> 'orange'
+ * - otherwise (daysLeft >= 7) -> 'yellow'
+ */
+export function getDeadlineBarColorLevel(
+  reminderOrDaysLeft: ReminderItem | number,
+  status?: ReminderStatus
+): DeadlineBarColorLevel {
+  let daysLeft: number;
+  let currentStatus: ReminderStatus | undefined = status;
+
+  if (typeof reminderOrDaysLeft === 'number') {
+    daysLeft = reminderOrDaysLeft;
+    if (!currentStatus) {
+      if (daysLeft < 0) currentStatus = 'overdue';
+      else if (daysLeft === 0) currentStatus = 'today';
+      else currentStatus = 'soon';
+    }
+  } else {
+    daysLeft = reminderOrDaysLeft.daysLeft;
+    currentStatus = reminderOrDaysLeft.status;
+  }
+
+  if (currentStatus === 'overdue' || currentStatus === 'today' || daysLeft <= 0) {
+    return 'red';
+  }
+
+  if (daysLeft < 7) {
+    return 'orange';
+  }
+
+  return 'yellow';
+}
+
+/**
+ * Formats YYYY-MM-DD to Czech "D. M." (e.g. 2026-10-17 -> "17. 10.")
+ */
+export function formatDeadlineBarDate(dateStr: string): string {
+  if (!dateStr || dateStr.length < 10) return '';
+  const [, m, d] = dateStr.substring(0, 10).split('-');
+  return `${parseInt(d, 10)}. ${parseInt(m, 10)}.`;
+}
+
+/**
+ * Formats a deadline bar segment:
+ * labelPart: "<label> — <item name>:" (truncates with ellipsis)
+ * relativePart: "<relative text> (<date, cs-CZ>)" (nowrap, never truncated)
+ * fullText: "<label> — <item name>: <relative text> (<date, cs-CZ>)"
+ */
+export function formatDeadlineBarSegment(
+  reminder: ReminderItem,
+  itemName?: string
+): {
+  labelPart: string;
+  relativePart: string;
+  fullText: string;
+} {
+  const label = reminder.fieldName;
+  const name = itemName?.trim();
+  const labelPart = name ? `${label} — ${name}:` : `${label}:`;
+  const relText = formatRelativeDays(reminder.daysLeft);
+  const dateFormatted = formatDeadlineBarDate(reminder.dueDate);
+  const relativePart = `${relText} (${dateFormatted})`;
+  const fullText = `${labelPart} ${relativePart}`;
+
+  return { labelPart, relativePart, fullText };
+}
+
+/**
+ * Generates localStorage dismissal key from today's date plus the ids of the 2 shown reminders.
+ * If the day changes or the shown reminders change, the key differs and the bar reappears.
+ */
+export function getDeadlineBarDismissKey(
+  todayStr: string,
+  shownReminders: (ReminderItem | string)[]
+): string {
+  const ids = shownReminders.map((item) => {
+    if (typeof item === 'string') return item;
+    return item.eventId
+      ? `${item.itemId}:${item.eventId}`
+      : `${item.itemId}:${item.fieldId}`;
+  });
+  return `evidio_deadline_bar_dismissed_${todayStr}_${ids.join('_')}`;
+}
+
+export function isDeadlineBarDismissed(
+  todayStr: string,
+  shownReminders: (ReminderItem | string)[]
+): boolean {
+  if (typeof window === 'undefined' || !window.localStorage) return false;
+  try {
+    const key = getDeadlineBarDismissKey(todayStr, shownReminders);
+    return window.localStorage.getItem(key) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function dismissDeadlineBar(
+  todayStr: string,
+  shownReminders: (ReminderItem | string)[]
+): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const key = getDeadlineBarDismissKey(todayStr, shownReminders);
+    window.localStorage.setItem(key, 'true');
+  } catch {}
 }

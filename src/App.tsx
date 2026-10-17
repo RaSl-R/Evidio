@@ -7,7 +7,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, seedDemoCollectionIfEmpty, seedDemoEventFieldsIfMissing, DEFAULT_GROUP_ID } from './db';
 import { migrateSelectLabelsToIdsIfAny } from './utils/migration';
-import { Collection, CollectionGroup, Item, FieldDefinition, ItemEvent, Attachment, Tag } from './types';
+import { Collection, CollectionGroup, Item, FieldDefinition, ItemEvent, Attachment, Tag, ItemDetailFocus } from './types';
 import { itemMatchesSearch } from './utils/search';
 import { exportCollectionPackage, exportAllPackage, getLastBackupDate, getAttachmentsTotalSizeBytes } from './utils/export';
 import { getTagColorOption } from './utils/tagColors';
@@ -32,6 +32,7 @@ import { EmptyState } from './components/EmptyState';
 
 import { useToday } from './hooks/useToday';
 import { useReminders } from './hooks/useReminders';
+import { getReminderFocusTarget, ReminderItem } from './utils/reminders';
 
 import {
   Search,
@@ -119,7 +120,14 @@ export default function App() {
 
   // Detail & Timeline modal state: track item ID to always get fresh item data
   const [selectedDetailItemId, setSelectedDetailItemId] = useState<string | null>(null);
+  const [detailFocus, setDetailFocus] = useState<ItemDetailFocus | null>(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
+
+  const handleOpenDetail = (it: Item, focus?: ItemDetailFocus) => {
+    setSelectedDetailItemId(it.id);
+    setDetailFocus(focus || null);
+    setIsDetailModalOpen(true);
+  };
 
   // Event modal state
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
@@ -359,6 +367,7 @@ export default function App() {
   const todayStr = useToday();
   const {
     allReminders,
+    urgentReminders,
     urgentCount,
     hasOverdueOrToday,
     hasSoon,
@@ -642,6 +651,22 @@ export default function App() {
     }
   };
 
+  const handleReminderSelect = (reminder: ReminderItem) => {
+    const item = allItems?.find((i) => i.id === reminder.itemId);
+    if (!item) return;
+    const col = collections?.find((c) => c.id === item.collection_id);
+    if (!col) return;
+    const group = collectionGroups?.find((g) => g.id === col.group_id);
+    if (group && group.id !== activeGroupId) {
+      handleSelectGroup(group.id);
+    }
+    handleSelectCollection(col);
+    setSelectedDetailItemId(item.id);
+    const focus = getReminderFocusTarget(reminder);
+    setDetailFocus(focus);
+    setIsDetailModalOpen(true);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50/60 text-slate-900 flex flex-col font-sans">
       {/* Top Navbar with prominent section switcher and category tabs */}
@@ -664,6 +689,10 @@ export default function App() {
         remindersCount={urgentCount}
         hasOverdueOrToday={hasOverdueOrToday}
         hasSoon={hasSoon}
+        urgentReminders={urgentReminders}
+        allItems={allItems || []}
+        todayStr={todayStr}
+        onSelectReminder={handleReminderSelect}
       />
 
       {/* Export Notice Banner */}
@@ -993,10 +1022,8 @@ export default function App() {
                     tags={collectionTags || []}
                     urgentReminder={mostUrgentReminderByItemId.get(item.id)}
                     totalRemindersCount={remindersByItemId.get(item.id)?.length}
-                    onOpenDetail={(it) => {
-                      setSelectedDetailItemId(it.id);
-                      setIsDetailModalOpen(true);
-                    }}
+                    itemReminders={remindersByItemId.get(item.id) || []}
+                    onOpenDetail={handleOpenDetail}
                     onEdit={(it) => {
                       setItemToEdit(it);
                       setIsItemModalOpen(true);
@@ -1017,10 +1044,8 @@ export default function App() {
                     tags={collectionTags || []}
                     urgentReminder={mostUrgentReminderByItemId.get(item.id)}
                     totalRemindersCount={remindersByItemId.get(item.id)?.length}
-                    onOpenDetail={(it) => {
-                      setSelectedDetailItemId(it.id);
-                      setIsDetailModalOpen(true);
-                    }}
+                    itemReminders={remindersByItemId.get(item.id) || []}
+                    onOpenDetail={handleOpenDetail}
                     onEdit={(it) => {
                       setItemToEdit(it);
                       setIsItemModalOpen(true);
@@ -1074,6 +1099,7 @@ export default function App() {
           setActiveCollectionId(null);
           setIsDetailModalOpen(false);
           setSelectedDetailItemId(null);
+          setDetailFocus(null);
         }}
       />
 
@@ -1091,6 +1117,7 @@ export default function App() {
         onClose={() => {
           setIsDetailModalOpen(false);
           setSelectedDetailItemId(null);
+          setDetailFocus(null);
         }}
         item={currentDetailItem}
         fields={fieldDefinitions || []}
@@ -1098,6 +1125,7 @@ export default function App() {
         urgentReminder={currentDetailItem ? mostUrgentReminderByItemId.get(currentDetailItem.id) : null}
         totalRemindersCount={currentDetailItem ? remindersByItemId.get(currentDetailItem.id)?.length : 0}
         itemReminders={currentDetailItem ? remindersByItemId.get(currentDetailItem.id) || [] : []}
+        focus={detailFocus}
         onEditItem={(it) => {
           setItemToEdit(it);
           setIsItemModalOpen(true);
@@ -1124,12 +1152,13 @@ export default function App() {
         collections={collections || []}
         collectionGroups={collectionGroups || []}
         activeCollection={activeCollection}
-        onNavigateToItem={(item, col, group) => {
+        onNavigateToItem={(item, col, group, focus) => {
           if (group && group.id !== activeGroupId) {
             handleSelectGroup(group.id);
           }
           handleSelectCollection(col);
           setSelectedDetailItemId(item.id);
+          setDetailFocus(focus || null);
           setIsDetailModalOpen(true);
         }}
       />

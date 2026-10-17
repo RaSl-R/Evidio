@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Collection, CollectionGroup } from '../types';
+import { Collection, CollectionGroup, Item } from '../types';
+import { ReminderItem } from '../utils/reminders';
+import { DeadlineBar } from './DeadlineBar';
 import {
   Box,
   Plus,
@@ -30,6 +32,10 @@ interface NavbarProps {
   remindersCount: number;
   hasOverdueOrToday: boolean;
   hasSoon: boolean;
+  urgentReminders: ReminderItem[];
+  allItems: Item[];
+  todayStr: string;
+  onSelectReminder: (reminder: ReminderItem) => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -48,6 +54,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   remindersCount,
   hasOverdueOrToday,
   hasSoon,
+  urgentReminders,
+  allItems,
+  todayStr,
+  onSelectReminder,
 }) => {
   const [isBackupDismissed, setIsBackupDismissed] = useState(false);
   const [isDataMenuOpen, setIsDataMenuOpen] = useState(false);
@@ -242,6 +252,15 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
       </div>
+
+        {/* DEADLINE BAR: compact bar directly under header and ABOVE backup note */}
+        <DeadlineBar
+          reminders={urgentReminders}
+          items={allItems}
+          todayStr={todayStr}
+          onSelectReminder={onSelectReminder}
+          onOpenAllReminders={onOpenReminders}
+        />
 
         {/* Backup Reminder (small dismissible note) */}
         {!isBackupDismissed && (

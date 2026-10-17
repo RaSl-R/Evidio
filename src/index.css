@@ -1,1 +1,14 @@
 @import "tailwindcss";
+
+.cq-chips-narrow {
+  display: none !important;
+}
+
+@container (max-width: 239px) {
+  .cq-chips-normal {
+    display: none !important;
+  }
+  .cq-chips-narrow {
+    display: flex !important;
+  }
+}

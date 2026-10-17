@@ -1,9 +1,14 @@
 import React from 'react';
-import { Item, FieldDefinition, ItemEvent, Attachment, Tag } from '../types';
+import { Item, FieldDefinition, ItemEvent, Attachment, Tag, ItemDetailFocus } from '../types';
 import { Edit2, Trash2, Bell } from 'lucide-react';
 import { useAttachmentUrl } from '../hooks/useAttachmentUrl';
 import { getTagColorOption } from '../utils/tagColors';
-import { ReminderItem, formatRelativeDays } from '../utils/reminders';
+import {
+  ReminderItem,
+  formatRelativeDays,
+  selectItemReminderChips,
+  getReminderFocusTarget,
+} from '../utils/reminders';
 import {
   formatCompactFieldValue,
   formatDateLabel,
@@ -19,7 +24,8 @@ interface ItemListItemProps {
   tags?: Tag[];
   urgentReminder?: ReminderItem | null;
   totalRemindersCount?: number;
-  onOpenDetail: (item: Item) => void;
+  itemReminders?: ReminderItem[];
+  onOpenDetail: (item: Item, focus?: ItemDetailFocus) => void;
   onEdit: (item: Item) => void;
   onDelete: (item: Item) => void;
 }
@@ -32,6 +38,7 @@ export const ItemListItem: React.FC<ItemListItemProps> = ({
   tags = [],
   urgentReminder,
   totalRemindersCount,
+  itemReminders = [],
   onOpenDetail,
   onEdit,
   onDelete,
@@ -55,6 +62,83 @@ export const ItemListItem: React.FC<ItemListItemProps> = ({
   const sortedEvents = sortEventsDesc(events);
   const latestEvent = sortedEvents[0];
 
+  const remindersToUse =
+    itemReminders && itemReminders.length > 0
+      ? itemReminders
+      : urgentReminder
+      ? [urgentReminder]
+      : [];
+
+  const normalChips = selectItemReminderChips(remindersToUse, 2);
+  const narrowChips = selectItemReminderChips(remindersToUse, 1);
+
+  const renderReminderChip = (r: ReminderItem) => {
+    const focus = getReminderFocusTarget(r);
+    const isOverdueOrToday = r.status === 'overdue' || r.status === 'today';
+    const isSoon = r.status === 'soon';
+    const tooltipText = `${r.fieldName}: ${formatDateLabel(r.dueDate)}${
+      r.dueTime ? ` · ${r.dueTime}` : ''
+    } (${formatRelativeDays(r.daysLeft)})`;
+    const ariaLabel = `Otevřít detail položky na ${
+      r.targetKind === 'EVENT' ? 'události' : 'vlastnosti'
+    }: ${r.fieldName}, ${formatRelativeDays(r.daysLeft)}`;
+
+    return (
+      <button
+        key={`${r.fieldId}-${r.dueDate}`}
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenDetail(item, focus);
+        }}
+        title={tooltipText}
+        aria-label={ariaLabel}
+        className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-md text-[9px] font-bold border min-w-0 shrink cursor-pointer transition-colors ${
+          isOverdueOrToday
+            ? 'bg-red-50 hover:bg-red-100 text-red-700 border-red-200'
+            : isSoon
+            ? 'bg-amber-50 hover:bg-amber-100 text-amber-700 border-amber-200'
+            : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+        }`}
+        style={{ minWidth: 0 }}
+      >
+        <Bell className="w-2 h-2 shrink-0" />
+        <span className="truncate min-w-0">
+          {r.fieldName}
+        </span>
+        <span className="shrink-0 whitespace-nowrap">
+          : {formatRelativeDays(r.daysLeft)}
+        </span>
+      </button>
+    );
+  };
+
+  const renderPlusButton = (hiddenCount: number, nextHidden: ReminderItem | null) => {
+    if (hiddenCount <= 0 || !nextHidden) return null;
+    const focus = getReminderFocusTarget(nextHidden);
+    const nextTooltipDate = `${formatDateLabel(nextHidden.dueDate)}${
+      nextHidden.dueTime ? ` · ${nextHidden.dueTime}` : ''
+    }`;
+    const ariaLabel = `Otevřít detail položky na dalším termínu: ${nextHidden.fieldName}, ${formatRelativeDays(
+      nextHidden.daysLeft
+    )}`;
+
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenDetail(item, focus);
+        }}
+        title={`+${hiddenCount} dalších termínů (${nextHidden.fieldName}: ${nextTooltipDate})`}
+        aria-label={ariaLabel}
+        className="inline-flex items-center px-1.5 py-0.2 rounded-md text-[9px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 shrink-0 cursor-pointer transition-colors"
+      >
+        +{hiddenCount}
+      </button>
+    );
+  };
+
   return (
     <div
       onClick={() => onOpenDetail(item)}
@@ -70,31 +154,37 @@ export const ItemListItem: React.FC<ItemListItemProps> = ({
           />
         )}
 
-        {/* Mobile Layout (< md): 1 line name with reminder chip, 2nd line up to 2 values */}
+        {/* Mobile Layout (< md): 1 line name with reminder chips, 2nd line up to 2 values */}
         <div className="min-w-0 flex-1 md:hidden">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="font-bold text-xs sm:text-sm text-slate-900 group-hover:text-indigo-600 transition-colors truncate">
+          <div className="flex items-center gap-1.5 flex-nowrap overflow-hidden max-w-full">
+            <span className="font-bold text-xs sm:text-sm text-slate-900 group-hover:text-indigo-600 transition-colors truncate shrink-0 max-w-[140px]">
               {item.name}
             </span>
-            {urgentReminder && (
-              <span
-                className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-md text-[9px] font-bold border shrink-0 ${
-                  urgentReminder.status === 'overdue' || urgentReminder.status === 'today'
-                    ? 'bg-red-50 text-red-700 border-red-200'
-                    : urgentReminder.status === 'soon'
-                    ? 'bg-amber-50 text-amber-700 border-amber-200'
-                    : 'bg-slate-50 text-slate-700 border-slate-200'
-                }`}
-                title={`${urgentReminder.fieldName}: ${formatRelativeDays(urgentReminder.daysLeft)}`}
+            {normalChips.totalUrgentCount > 0 && (
+              <div
+                style={{ containerType: 'inline-size' }}
+                className="@container flex-1 min-w-0 flex items-center"
               >
-                <Bell className="w-2 h-2 shrink-0" />
-                <span className="truncate max-w-[120px]">
-                  {urgentReminder.fieldName}: {formatRelativeDays(urgentReminder.daysLeft)}
-                </span>
-                {totalRemindersCount && totalRemindersCount > 1 && (
-                  <span>+{totalRemindersCount - 1}</span>
+                {normalChips.totalUrgentCount === 1 ? (
+                  <div className="flex items-center gap-1 flex-nowrap overflow-hidden max-w-full">
+                    {renderReminderChip(normalChips.visibleReminders[0])}
+                  </div>
+                ) : (
+                  <>
+                    {/* Container >= 240px: up to 2 chips + "+N" (both keep >= 110px) */}
+                    <div className="cq-chips-normal flex items-center gap-1 flex-nowrap overflow-hidden max-w-full">
+                      {normalChips.visibleReminders.map((r) => renderReminderChip(r))}
+                      {renderPlusButton(normalChips.hiddenCount, normalChips.nextHiddenReminder)}
+                    </div>
+
+                    {/* Container < 240px: 1 chip + "+N" */}
+                    <div className="cq-chips-narrow flex items-center gap-1 flex-nowrap overflow-hidden max-w-full">
+                      {narrowChips.visibleReminders.map((r) => renderReminderChip(r))}
+                      {renderPlusButton(narrowChips.hiddenCount, narrowChips.nextHiddenReminder)}
+                    </div>
+                  </>
                 )}
-              </span>
+              </div>
             )}
           </div>
           <div className="text-[11px] text-slate-500 truncate flex items-center gap-1 mt-0.5">
@@ -178,32 +268,11 @@ export const ItemListItem: React.FC<ItemListItemProps> = ({
             </div>
           )}
 
-          {/* Urgent Reminder Status Chip on Desktop */}
-          {urgentReminder && (
+          {/* Urgent Reminder Status Chips on Desktop */}
+          {normalChips.totalUrgentCount > 0 && (
             <div className="flex items-center gap-1 shrink-0">
-              <span
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border truncate max-w-[200px] ${
-                  urgentReminder.status === 'overdue' || urgentReminder.status === 'today'
-                    ? 'bg-red-50 text-red-700 border-red-200'
-                    : urgentReminder.status === 'soon'
-                    ? 'bg-amber-50 text-amber-700 border-amber-200'
-                    : 'bg-slate-50 text-slate-700 border-slate-200'
-                }`}
-                title={`${urgentReminder.fieldName}: ${formatDateLabel(urgentReminder.dueDate)} (${formatRelativeDays(urgentReminder.daysLeft)})`}
-              >
-                <Bell className="w-2.5 h-2.5 shrink-0" />
-                <span className="truncate">
-                  {urgentReminder.fieldName}: {formatRelativeDays(urgentReminder.daysLeft)}
-                </span>
-              </span>
-              {totalRemindersCount && totalRemindersCount > 1 && (
-                <span
-                  className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200"
-                  title={`+${totalRemindersCount - 1} dalších termínů`}
-                >
-                  +{totalRemindersCount - 1}
-                </span>
-              )}
+              {normalChips.visibleReminders.map((r) => renderReminderChip(r))}
+              {renderPlusButton(normalChips.hiddenCount, normalChips.nextHiddenReminder)}
             </div>
           )}
 

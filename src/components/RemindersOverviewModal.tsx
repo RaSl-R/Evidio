@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
-import { ReminderItem, formatRelativeDays } from '../utils/reminders';
+import { ReminderItem, formatRelativeDays, getReminderFocusTarget } from '../utils/reminders';
 import { formatDateLabel } from '../utils/itemHelpers';
-import { Item, Collection, CollectionGroup } from '../types';
+import { Item, Collection, CollectionGroup, ItemDetailFocus } from '../types';
 import {
   X,
   Bell,
@@ -24,7 +24,8 @@ interface RemindersOverviewModalProps {
   onNavigateToItem: (
     item: Item,
     collection: Collection,
-    group: CollectionGroup | null
+    group: CollectionGroup | null,
+    focus?: ItemDetailFocus
   ) => void;
 }
 
@@ -107,8 +108,9 @@ export const RemindersOverviewModal: React.FC<RemindersOverviewModalProps> = ({
     const col = collectionsMap.get(reminder.collectionId);
     if (!item || !col) return;
     const group = col.group_id ? groupsMap.get(col.group_id) || null : null;
+    const focus = getReminderFocusTarget(reminder);
     onClose();
-    onNavigateToItem(item, col, group);
+    onNavigateToItem(item, col, group, focus);
   };
 
   const renderReminderRow = (reminder: ReminderItem) => {
@@ -146,6 +148,7 @@ export const RemindersOverviewModal: React.FC<RemindersOverviewModalProps> = ({
           <div className="text-right">
             <div className="text-xs font-semibold text-slate-800">
               {formatDateLabel(reminder.dueDate)}
+              {reminder.dueTime ? ` · ${reminder.dueTime}` : ''}
             </div>
             <div
               className={`text-[11px] font-bold ${

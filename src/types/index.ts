@@ -144,6 +144,12 @@ export interface Attachment {
   updated_at: string;
 }
 
+export interface ItemDetailFocus {
+  section: 'events' | 'properties';
+  eventId?: string;
+  fieldId?: string;
+}
+
 export interface EvidioPackage {
   format: 'evidio_package';
   version: 1;

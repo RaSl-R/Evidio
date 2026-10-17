@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { computeReminders, computeEventReminders, formatEventReminderLabel, formatRelativeDays } from '../reminders';
+import {
+  computeReminders,
+  computeEventReminders,
+  formatEventReminderLabel,
+  formatRelativeDays,
+  selectItemReminderChips,
+  getReminderFocusTarget,
+  compareRemindersByUrgency,
+  ReminderItem,
+  selectDeadlineBarReminders,
+  getDeadlineBarColorLevel,
+  formatDeadlineBarSegment,
+  getDeadlineBarDismissKey,
+} from '../reminders';
 import { sanitizeConfigForTypeChange } from '../fieldTypes';
 import { prepareImportCopy, prepareImportRestore } from '../import';
 import { buildEvidioPackage } from '../export';
@@ -802,6 +815,375 @@ describe('Deadline Reminders Unit Tests', () => {
       expect(eventR.targetKind).toBe('EVENT');
       expect(eventR.daysLeft).toBe(11);
       expect(eventR.fieldName).toBe('Servis: Výměna oleje (09:00)');
+      expect(eventR.dueTime).toBe('09:00');
+    });
+
+    it('EVENT-level date field reminder includes eventId and dueTime from the latest event', () => {
+      const eventFieldDef: FieldDefinition = {
+        id: 'field-qfa-date',
+        collection_id: dummyColId,
+        target: 'EVENT',
+        key: 'field_qfa_date',
+        name: 'Příští revize',
+        data_type: 'date',
+        unit: null,
+        event_types: ['Revize'],
+        is_required: false,
+        is_archived: false,
+        display_order: 1,
+        config: { reminder: { enabled: true, days_before: 30 } },
+        validation_rules: {},
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+
+      const eventOld: ItemEvent = {
+        id: 'event-qfa-old',
+        item_id: dummyItemId,
+        event_type: 'Revize',
+        title: 'Stará revize',
+        event_date: '2026-01-10',
+        event_time: '08:00',
+        data: { 'field-qfa-date': '2026-04-15' },
+        created_at: '2026-01-10T00:00:00Z',
+        updated_at: '2026-01-10T00:00:00Z',
+      };
+
+      const eventNew: ItemEvent = {
+        id: 'event-qfa-new',
+        item_id: dummyItemId,
+        event_type: 'Revize',
+        title: 'Nová revize',
+        event_date: '2026-03-01',
+        event_time: '13:45',
+        data: { 'field-qfa-date': '2026-05-20' },
+        created_at: '2026-03-01T00:00:00Z',
+        updated_at: '2026-03-01T00:00:00Z',
+      };
+
+      const reminders = computeReminders([eventFieldDef], [testItem], [eventOld, eventNew], '2026-05-01');
+      expect(reminders).toHaveLength(1);
+      expect(reminders[0].fieldId).toBe('field-qfa-date');
+      expect(reminders[0].targetKind).toBe('EVENT');
+      expect(reminders[0].eventId).toBe('event-qfa-new');
+      expect(reminders[0].dueTime).toBe('13:45');
+      expect(reminders[0].dueDate).toBe('2026-05-20');
+
+      const focus = getReminderFocusTarget(reminders[0]);
+      expect(focus).toEqual({
+        section: 'events',
+        eventId: 'event-qfa-new',
+      });
+    });
+  });
+
+  describe('14. Reminder Chips Selection & Focus Helpers', () => {
+    const makeReminder = (overrides: Partial<ReminderItem>): ReminderItem => ({
+      itemId: dummyItemId,
+      collectionId: dummyColId,
+      fieldId: 'f1',
+      fieldName: 'Test reminder',
+      targetKind: 'ITEM',
+      dueDate: '2026-10-20',
+      dueTime: null,
+      daysLeft: 3,
+      status: 'soon',
+      ...overrides,
+    });
+
+    it('returns empty result when 0 reminders provided', () => {
+      const res = selectItemReminderChips([]);
+      expect(res.visibleReminders).toEqual([]);
+      expect(res.hiddenCount).toBe(0);
+      expect(res.nextHiddenReminder).toBeNull();
+      expect(res.totalUrgentCount).toBe(0);
+    });
+
+    it('returns 1 visible chip and 0 hidden when 1 urgent reminder provided', () => {
+      const r1 = makeReminder({ fieldName: 'R1', daysLeft: 2 });
+      const res = selectItemReminderChips([r1]);
+      expect(res.visibleReminders).toHaveLength(1);
+      expect(res.visibleReminders[0].fieldName).toBe('R1');
+      expect(res.hiddenCount).toBe(0);
+      expect(res.nextHiddenReminder).toBeNull();
+      expect(res.totalUrgentCount).toBe(1);
+    });
+
+    it('returns 2 visible chips and 0 hidden when 2 urgent reminders provided (normal mode)', () => {
+      const r1 = makeReminder({ fieldName: 'R1', daysLeft: 1 });
+      const r2 = makeReminder({ fieldName: 'R2', daysLeft: 4 });
+      const res = selectItemReminderChips([r2, r1], 2);
+      expect(res.visibleReminders).toHaveLength(2);
+      expect(res.visibleReminders[0].fieldName).toBe('R1');
+      expect(res.visibleReminders[1].fieldName).toBe('R2');
+      expect(res.hiddenCount).toBe(0);
+      expect(res.nextHiddenReminder).toBeNull();
+      expect(res.totalUrgentCount).toBe(2);
+    });
+
+    it('returns 1 visible chip and 1 hidden (+1) with nextHiddenReminder when 2 urgent reminders provided in narrow mode (maxVisible = 1)', () => {
+      const r1 = makeReminder({ fieldName: 'R1', daysLeft: 1 });
+      const r2 = makeReminder({ fieldName: 'R2', daysLeft: 4 });
+      const res = selectItemReminderChips([r2, r1], 1);
+      expect(res.visibleReminders).toHaveLength(1);
+      expect(res.visibleReminders[0].fieldName).toBe('R1');
+      expect(res.hiddenCount).toBe(1);
+      expect(res.nextHiddenReminder?.fieldName).toBe('R2');
+      expect(res.totalUrgentCount).toBe(2);
+    });
+
+    it('shows 2 visible chips, counts remaining, and provides nextHiddenReminder when 3+ reminders provided', () => {
+      const r1 = makeReminder({ fieldName: 'R1', daysLeft: 0, status: 'today' });
+      const r2 = makeReminder({ fieldName: 'R2', daysLeft: 2, status: 'soon' });
+      const r3 = makeReminder({ fieldName: 'R3', daysLeft: 5, status: 'soon', targetKind: 'EVENT', eventId: 'ev-3' });
+      const r4 = makeReminder({ fieldName: 'R4', daysLeft: 8, status: 'soon' });
+
+      const res = selectItemReminderChips([r4, r2, r1, r3], 2);
+      expect(res.visibleReminders).toHaveLength(2);
+      expect(res.visibleReminders[0].fieldName).toBe('R1');
+      expect(res.visibleReminders[1].fieldName).toBe('R2');
+      expect(res.hiddenCount).toBe(2);
+      expect(res.nextHiddenReminder?.fieldName).toBe('R3');
+      expect(res.totalUrgentCount).toBe(4);
+
+      // Focus target of the most urgent hidden reminder
+      expect(res.nextHiddenReminder).not.toBeNull();
+      const focus = getReminderFocusTarget(res.nextHiddenReminder!);
+      expect(focus).toEqual({
+        section: 'events',
+        eventId: 'ev-3',
+      });
+    });
+
+    it('narrow mode (maxVisible = 1) selects 1 visible chip and counts all others as hidden', () => {
+      const r1 = makeReminder({ fieldName: 'R1', daysLeft: 1 });
+      const r2 = makeReminder({ fieldName: 'R2', daysLeft: 3 });
+      const r3 = makeReminder({ fieldName: 'R3', daysLeft: 6 });
+
+      const res = selectItemReminderChips([r1, r2, r3], 1);
+      expect(res.visibleReminders).toHaveLength(1);
+      expect(res.visibleReminders[0].fieldName).toBe('R1');
+      expect(res.hiddenCount).toBe(2);
+      expect(res.nextHiddenReminder?.fieldName).toBe('R2');
+      expect(res.totalUrgentCount).toBe(3);
+    });
+
+    it('strictly excludes reminders with status "later"', () => {
+      const urgent = makeReminder({ fieldName: 'Urgent', daysLeft: 5, status: 'soon' });
+      const later = makeReminder({ fieldName: 'Later', daysLeft: 45, status: 'later' });
+
+      const res = selectItemReminderChips([later, urgent], 2);
+      expect(res.visibleReminders).toHaveLength(1);
+      expect(res.visibleReminders[0].fieldName).toBe('Urgent');
+      expect(res.hiddenCount).toBe(0);
+      expect(res.totalUrgentCount).toBe(1);
+    });
+
+    it('sorts overdue first (daysLeft ascending)', () => {
+      const overdue = makeReminder({ fieldName: 'Overdue', daysLeft: -3, status: 'overdue' });
+      const today = makeReminder({ fieldName: 'Today', daysLeft: 0, status: 'today' });
+      const soon = makeReminder({ fieldName: 'Soon', daysLeft: 2, status: 'soon' });
+
+      const res = selectItemReminderChips([soon, today, overdue], 3);
+      expect(res.visibleReminders.map((r) => r.fieldName)).toEqual(['Overdue', 'Today', 'Soon']);
+    });
+
+    it('tie-breaks identical daysLeft by time (timed before untimed, earlier before later)', () => {
+      const morning = makeReminder({ fieldName: 'Morning', daysLeft: 2, dueTime: '08:30' });
+      const afternoon = makeReminder({ fieldName: 'Afternoon', daysLeft: 2, dueTime: '14:00' });
+      const untimed = makeReminder({ fieldName: 'Untimed', daysLeft: 2, dueTime: null });
+
+      const res = selectItemReminderChips([untimed, afternoon, morning], 3);
+      expect(res.visibleReminders.map((r) => r.fieldName)).toEqual(['Morning', 'Afternoon', 'Untimed']);
+    });
+
+    it('tie-breaks identical daysLeft and time by label in Czech locale', () => {
+      const b = makeReminder({ fieldName: 'B', daysLeft: 2, dueTime: '10:00' });
+      const a = makeReminder({ fieldName: 'A', daysLeft: 2, dueTime: '10:00' });
+      const c = makeReminder({ fieldName: 'C', daysLeft: 2, dueTime: '10:00' });
+
+      const res = selectItemReminderChips([c, b, a], 3);
+      expect(res.visibleReminders.map((r) => r.fieldName)).toEqual(['A', 'B', 'C']);
+    });
+
+    it('getReminderFocusTarget handles ITEM and EVENT kinds correctly', () => {
+      const itemReminder = makeReminder({ targetKind: 'ITEM', fieldId: 'field-item-123' });
+      expect(getReminderFocusTarget(itemReminder)).toEqual({
+        section: 'properties',
+        fieldId: 'field-item-123',
+      });
+
+      const eventReminder = makeReminder({ targetKind: 'EVENT', fieldId: 'event-uuid-456', eventId: 'event-uuid-456' });
+      expect(getReminderFocusTarget(eventReminder)).toEqual({
+        section: 'events',
+        eventId: 'event-uuid-456',
+      });
+    });
+  });
+
+  describe('Deadline Bar Pure Helpers', () => {
+    const makeReminder = (overrides: Partial<ReminderItem> = {}): ReminderItem => ({
+      itemId: 'item-1',
+      collectionId: 'col-1',
+      fieldId: 'f1',
+      fieldName: 'Test reminder',
+      targetKind: 'ITEM',
+      dueDate: '2026-10-20',
+      dueTime: null,
+      daysLeft: 3,
+      status: 'soon',
+      ...overrides,
+    });
+
+    describe('selectDeadlineBarReminders', () => {
+      it('returns empty result when 0 reminders are provided', () => {
+        const res = selectDeadlineBarReminders([]);
+        expect(res.shownReminders).toEqual([]);
+        expect(res.totalUrgentCount).toBe(0);
+        expect(res.remainingCount).toBe(0);
+      });
+
+      it('returns 1 shown reminder and remaining count 0 when 1 urgent reminder is provided', () => {
+        const r1 = makeReminder({ fieldName: 'R1', daysLeft: 2 });
+        const res = selectDeadlineBarReminders([r1]);
+        expect(res.shownReminders).toHaveLength(1);
+        expect(res.shownReminders[0].fieldName).toBe('R1');
+        expect(res.totalUrgentCount).toBe(1);
+        expect(res.remainingCount).toBe(0);
+      });
+
+      it('returns 2 shown reminders and remaining count 0 when 2 urgent reminders are provided', () => {
+        const r1 = makeReminder({ fieldName: 'R1', daysLeft: 1 });
+        const r2 = makeReminder({ fieldName: 'R2', daysLeft: 4 });
+        const res = selectDeadlineBarReminders([r2, r1]);
+        expect(res.shownReminders).toHaveLength(2);
+        expect(res.shownReminders[0].fieldName).toBe('R1');
+        expect(res.shownReminders[1].fieldName).toBe('R2');
+        expect(res.totalUrgentCount).toBe(2);
+        expect(res.remainingCount).toBe(0);
+      });
+
+      it('returns 2 nearest reminders and calculates remaining count when 5 reminders are provided', () => {
+        const r1 = makeReminder({ fieldName: 'R1', daysLeft: -1, status: 'overdue' });
+        const r2 = makeReminder({ fieldName: 'R2', daysLeft: 0, status: 'today' });
+        const r3 = makeReminder({ fieldName: 'R3', daysLeft: 3, status: 'soon' });
+        const r4 = makeReminder({ fieldName: 'R4', daysLeft: 6, status: 'soon' });
+        const r5 = makeReminder({ fieldName: 'R5', daysLeft: 10, status: 'soon' });
+
+        const res = selectDeadlineBarReminders([r5, r3, r1, r4, r2]);
+        expect(res.shownReminders).toHaveLength(2);
+        expect(res.shownReminders[0].fieldName).toBe('R1');
+        expect(res.shownReminders[1].fieldName).toBe('R2');
+        expect(res.totalUrgentCount).toBe(5);
+        expect(res.remainingCount).toBe(3); // 5 - 2 = 3
+      });
+
+      it('strictly excludes reminders with status "later"', () => {
+        const urgent = makeReminder({ fieldName: 'Urgent', daysLeft: 5, status: 'soon' });
+        const later = makeReminder({ fieldName: 'Later', daysLeft: 45, status: 'later' });
+
+        const res = selectDeadlineBarReminders([later, urgent]);
+        expect(res.shownReminders).toHaveLength(1);
+        expect(res.shownReminders[0].fieldName).toBe('Urgent');
+        expect(res.totalUrgentCount).toBe(1);
+        expect(res.remainingCount).toBe(0);
+      });
+    });
+
+    describe('getDeadlineBarColorLevel at daysLeft 0, 1, 6, 7, 30 and overdue', () => {
+      it('returns red for overdue reminder (daysLeft < 0)', () => {
+        const rOverdue = makeReminder({ daysLeft: -2, status: 'overdue' });
+        expect(getDeadlineBarColorLevel(rOverdue)).toBe('red');
+        expect(getDeadlineBarColorLevel(-2, 'overdue')).toBe('red');
+      });
+
+      it('returns red for daysLeft 0 (today)', () => {
+        const rToday = makeReminder({ daysLeft: 0, status: 'today' });
+        expect(getDeadlineBarColorLevel(rToday)).toBe('red');
+        expect(getDeadlineBarColorLevel(0)).toBe('red');
+      });
+
+      it('returns orange for daysLeft 1 (< 7)', () => {
+        const r1 = makeReminder({ daysLeft: 1, status: 'soon' });
+        expect(getDeadlineBarColorLevel(r1)).toBe('orange');
+        expect(getDeadlineBarColorLevel(1)).toBe('orange');
+      });
+
+      it('returns orange for daysLeft 6 (< 7)', () => {
+        const r6 = makeReminder({ daysLeft: 6, status: 'soon' });
+        expect(getDeadlineBarColorLevel(r6)).toBe('orange');
+        expect(getDeadlineBarColorLevel(6)).toBe('orange');
+      });
+
+      it('returns yellow for daysLeft 7 (>= 7)', () => {
+        const r7 = makeReminder({ daysLeft: 7, status: 'soon' });
+        expect(getDeadlineBarColorLevel(r7)).toBe('yellow');
+        expect(getDeadlineBarColorLevel(7)).toBe('yellow');
+      });
+
+      it('returns yellow for daysLeft 30 (>= 7)', () => {
+        const r30 = makeReminder({ daysLeft: 30, status: 'soon' });
+        expect(getDeadlineBarColorLevel(r30)).toBe('yellow');
+        expect(getDeadlineBarColorLevel(30)).toBe('yellow');
+      });
+    });
+
+    describe('getDeadlineBarDismissKey and dismissal persistence', () => {
+      it('generates consistent dismissal key from todayStr and shown reminder ids', () => {
+        const r1 = makeReminder({ itemId: 'item-a', fieldId: 'field-1' });
+        const r2 = makeReminder({ itemId: 'item-b', targetKind: 'EVENT', eventId: 'event-2' });
+
+        const key1 = getDeadlineBarDismissKey('2026-10-17', [r1, r2]);
+        expect(key1).toBe('evidio_deadline_bar_dismissed_2026-10-17_item-a:field-1_item-b:event-2');
+
+        // Works with string IDs as well
+        const key2 = getDeadlineBarDismissKey('2026-10-17', ['id-1', 'id-2']);
+        expect(key2).toBe('evidio_deadline_bar_dismissed_2026-10-17_id-1_id-2');
+      });
+
+      it('produces different key for the next day so bar reappears tomorrow', () => {
+        const r1 = makeReminder({ itemId: 'item-a', fieldId: 'field-1' });
+        const keyToday = getDeadlineBarDismissKey('2026-10-17', [r1]);
+        const keyTomorrow = getDeadlineBarDismissKey('2026-10-18', [r1]);
+        expect(keyToday).not.toBe(keyTomorrow);
+      });
+
+      it('produces different key when shown reminders change', () => {
+        const r1 = makeReminder({ itemId: 'item-a', fieldId: 'field-1' });
+        const r2 = makeReminder({ itemId: 'item-b', fieldId: 'field-2' });
+        const r3 = makeReminder({ itemId: 'item-c', fieldId: 'field-3' });
+
+        const keyA = getDeadlineBarDismissKey('2026-10-17', [r1, r2]);
+        const keyB = getDeadlineBarDismissKey('2026-10-17', [r1, r3]);
+        expect(keyA).not.toBe(keyB);
+      });
+    });
+
+    describe('formatDeadlineBarSegment', () => {
+      it('formats segment as "<label> — <item name>: <relative text> (<date, cs-CZ>)"', () => {
+        const r = makeReminder({
+          fieldName: 'Servis T1',
+          daysLeft: 4,
+          dueDate: '2026-10-17',
+        });
+        const seg = formatDeadlineBarSegment(r, 'Škoda Octavia Combi');
+        expect(seg.labelPart).toBe('Servis T1 — Škoda Octavia Combi:');
+        expect(seg.relativePart).toBe('za 4 dny (17. 10.)');
+        expect(seg.fullText).toBe('Servis T1 — Škoda Octavia Combi: za 4 dny (17. 10.)');
+      });
+
+      it('formats segment without item name if not provided', () => {
+        const r = makeReminder({
+          fieldName: 'Záruka',
+          daysLeft: 0,
+          dueDate: '2026-10-17',
+        });
+        const seg = formatDeadlineBarSegment(r);
+        expect(seg.labelPart).toBe('Záruka:');
+        expect(seg.relativePart).toBe('dnes (17. 10.)');
+        expect(seg.fullText).toBe('Záruka: dnes (17. 10.)');
+      });
     });
   });
 });
+
