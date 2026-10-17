@@ -32,7 +32,8 @@ import { EmptyState } from './components/EmptyState';
 
 import { useToday } from './hooks/useToday';
 import { useReminders } from './hooks/useReminders';
-import { getReminderFocusTarget, ReminderItem } from './utils/reminders';
+import { ReminderItem } from './utils/reminders';
+import { resolveNavigationTarget } from './utils/navigation';
 
 import {
   Search,
@@ -123,10 +124,37 @@ export default function App() {
   const [detailFocus, setDetailFocus] = useState<ItemDetailFocus | null>(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
 
-  const handleOpenDetail = (it: Item, focus?: ItemDetailFocus) => {
-    setSelectedDetailItemId(it.id);
-    setDetailFocus(focus || null);
+  const openItemFromReminder = (it: Item, focus?: ItemDetailFocus | null) => {
+    if (!it) return;
+    const target = resolveNavigationTarget(
+      it,
+      collections || [],
+      collectionGroups || [],
+      focus
+    );
+    if (!target) return;
+
+    if (target.groupId && target.groupId !== activeGroupId) {
+      setActiveGroupId(target.groupId);
+      try {
+        localStorage.setItem('evidio_active_group_id', target.groupId);
+      } catch {}
+    }
+
+    if (target.collectionId !== activeCollectionId) {
+      setActiveCollectionId(target.collectionId);
+      try {
+        localStorage.setItem('evidio_active_collection_id', target.collectionId);
+      } catch {}
+    }
+
+    setSelectedDetailItemId(target.itemId);
+    setDetailFocus(target.focus);
     setIsDetailModalOpen(true);
+  };
+
+  const handleOpenDetail = (it: Item, focus?: ItemDetailFocus) => {
+    openItemFromReminder(it, focus);
   };
 
   // Event modal state
@@ -375,22 +403,35 @@ export default function App() {
     mostUrgentReminderByItemId,
   } = useReminders(todayStr);
 
-  // Always keep currentDetailItem reactively synced with live items query
-  const currentDetailItem = useMemo(() => {
-    if (!selectedDetailItemId || !items) return null;
-    return items.find((i) => i.id === selectedDetailItemId) || null;
-  }, [selectedDetailItemId, items]);
+  // Live query item directly by ID, independent of currently selected section items list
+  const currentDetailItem = useLiveQuery<Item | null>(
+    async () => {
+      if (!selectedDetailItemId) return null;
+      const it = await db.items.get(selectedDetailItemId);
+      return it || null;
+    },
+    [selectedDetailItemId]
+  );
+
+  // Field definitions for current detail item's section
+  const detailFieldDefinitions = useLiveQuery<FieldDefinition[]>(
+    () =>
+      currentDetailItem?.collection_id
+        ? db.field_definitions
+            .where('collection_id')
+            .equals(currentDetailItem.collection_id)
+            .sortBy('display_order')
+        : Promise.resolve([] as FieldDefinition[]),
+    [currentDetailItem?.collection_id]
+  );
 
   // If the item currently viewed in detail was deleted or ceases to exist, close detail
   useEffect(() => {
-    if (isDetailModalOpen && selectedDetailItemId && items && items.length > 0) {
-      const exists = items.some((i) => i.id === selectedDetailItemId);
-      if (!exists) {
-        setIsDetailModalOpen(false);
-        setSelectedDetailItemId(null);
-      }
+    if (isDetailModalOpen && selectedDetailItemId && currentDetailItem === null) {
+      setIsDetailModalOpen(false);
+      setSelectedDetailItemId(null);
     }
-  }, [items, isDetailModalOpen, selectedDetailItemId]);
+  }, [currentDetailItem, isDetailModalOpen, selectedDetailItemId]);
 
   // Reactive query for all events in this collection for search matching and type suggestions
   const collectionEvents = useLiveQuery<ItemEvent[]>(async () => {
@@ -654,17 +695,11 @@ export default function App() {
   const handleReminderSelect = (reminder: ReminderItem) => {
     const item = allItems?.find((i) => i.id === reminder.itemId);
     if (!item) return;
-    const col = collections?.find((c) => c.id === item.collection_id);
-    if (!col) return;
-    const group = collectionGroups?.find((g) => g.id === col.group_id);
-    if (group && group.id !== activeGroupId) {
-      handleSelectGroup(group.id);
-    }
-    handleSelectCollection(col);
-    setSelectedDetailItemId(item.id);
-    const focus = getReminderFocusTarget(reminder);
-    setDetailFocus(focus);
-    setIsDetailModalOpen(true);
+    openItemFromReminder(item, {
+      section: reminder.targetKind === 'EVENT' ? 'events' : 'properties',
+      eventId: reminder.eventId,
+      fieldId: reminder.fieldId,
+    });
   };
 
   return (
@@ -1119,8 +1154,8 @@ export default function App() {
           setSelectedDetailItemId(null);
           setDetailFocus(null);
         }}
-        item={currentDetailItem}
-        fields={fieldDefinitions || []}
+        item={currentDetailItem || null}
+        fields={detailFieldDefinitions || fieldDefinitions || []}
         tags={collectionTags || []}
         urgentReminder={currentDetailItem ? mostUrgentReminderByItemId.get(currentDetailItem.id) : null}
         totalRemindersCount={currentDetailItem ? remindersByItemId.get(currentDetailItem.id)?.length : 0}
@@ -1137,7 +1172,7 @@ export default function App() {
           setIsEventModalOpen(true);
         }}
         onOpenEditEvent={(ev) => {
-          setEventItemTarget(currentDetailItem);
+          setEventItemTarget(currentDetailItem || null);
           setEventToEdit(ev);
           setIsEventModalOpen(true);
         }}
@@ -1152,14 +1187,8 @@ export default function App() {
         collections={collections || []}
         collectionGroups={collectionGroups || []}
         activeCollection={activeCollection}
-        onNavigateToItem={(item, col, group, focus) => {
-          if (group && group.id !== activeGroupId) {
-            handleSelectGroup(group.id);
-          }
-          handleSelectCollection(col);
-          setSelectedDetailItemId(item.id);
-          setDetailFocus(focus || null);
-          setIsDetailModalOpen(true);
+        onNavigateToItem={(item, _col, _group, focus) => {
+          openItemFromReminder(item, focus);
         }}
       />
 
