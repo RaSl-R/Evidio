@@ -1063,7 +1063,7 @@ describe('Deadline Reminders Unit Tests', () => {
         expect(res.remainingCount).toBe(0);
       });
 
-      it('returns 2 nearest reminders and calculates remaining count when 5 reminders are provided', () => {
+      it('returns 2 nearest reminders and calculates remaining count when 5 reminders are provided (3+ reminders)', () => {
         const r1 = makeReminder({ fieldName: 'R1', daysLeft: -1, status: 'overdue' });
         const r2 = makeReminder({ fieldName: 'R2', daysLeft: 0, status: 'today' });
         const r3 = makeReminder({ fieldName: 'R3', daysLeft: 3, status: 'soon' });
@@ -1076,6 +1076,23 @@ describe('Deadline Reminders Unit Tests', () => {
         expect(res.shownReminders[1].fieldName).toBe('R2');
         expect(res.totalUrgentCount).toBe(5);
         expect(res.remainingCount).toBe(3); // 5 - 2 = 3
+      });
+
+      it('filters out dismissed keys and lets the next nearest reminder take its place', () => {
+        const todayStr = '2026-10-17';
+        const r1 = makeReminder({ itemId: 'item-1', fieldId: 'f1', fieldName: 'R1', daysLeft: -1, status: 'overdue' });
+        const r2 = makeReminder({ itemId: 'item-1', fieldId: 'f2', fieldName: 'R2', daysLeft: 0, status: 'today' });
+        const r3 = makeReminder({ itemId: 'item-2', fieldId: 'f3', fieldName: 'R3', daysLeft: 2, status: 'soon' });
+
+        const dismissKey1 = getDeadlineBarDismissKey(r1, todayStr);
+        const dismissedKeys = new Set([dismissKey1]);
+
+        const res = selectDeadlineBarReminders([r1, r2, r3], dismissedKeys, 2, todayStr);
+        expect(res.shownReminders).toHaveLength(2);
+        expect(res.shownReminders[0].fieldName).toBe('R2');
+        expect(res.shownReminders[1].fieldName).toBe('R3');
+        expect(res.totalUrgentCount).toBe(2);
+        expect(res.remainingCount).toBe(0);
       });
 
       it('strictly excludes reminders with status "later"', () => {
@@ -1128,34 +1145,32 @@ describe('Deadline Reminders Unit Tests', () => {
       });
     });
 
-    describe('getDeadlineBarDismissKey and dismissal persistence', () => {
-      it('generates consistent dismissal key from todayStr and shown reminder ids', () => {
-        const r1 = makeReminder({ itemId: 'item-a', fieldId: 'field-1' });
-        const r2 = makeReminder({ itemId: 'item-b', targetKind: 'EVENT', eventId: 'event-2' });
-
-        const key1 = getDeadlineBarDismissKey('2026-10-17', [r1, r2]);
-        expect(key1).toBe('evidio_deadline_bar_dismissed_2026-10-17_item-a:field-1_item-b:event-2');
-
-        // Works with string IDs as well
-        const key2 = getDeadlineBarDismissKey('2026-10-17', ['id-1', 'id-2']);
-        expect(key2).toBe('evidio_deadline_bar_dismissed_2026-10-17_id-1_id-2');
+    describe('getDeadlineBarDismissKey uniqueness', () => {
+      it('generates unique dismissal key from todayStr, reminder ID, and due date', () => {
+        const r1 = makeReminder({ itemId: 'item-a', fieldId: 'field-1', dueDate: '2026-10-20' });
+        const key1 = getDeadlineBarDismissKey(r1, '2026-10-17');
+        expect(key1).toBe('2026-10-17_item-a:field-1_2026-10-20');
       });
 
-      it('produces different key for the next day so bar reappears tomorrow', () => {
-        const r1 = makeReminder({ itemId: 'item-a', fieldId: 'field-1' });
-        const keyToday = getDeadlineBarDismissKey('2026-10-17', [r1]);
-        const keyTomorrow = getDeadlineBarDismissKey('2026-10-18', [r1]);
+      it('guarantees uniqueness for two reminders of the same item', () => {
+        const r1 = makeReminder({ itemId: 'item-same', fieldId: 'f1', dueDate: '2026-10-20' });
+        const r2 = makeReminder({ itemId: 'item-same', fieldId: 'f2', dueDate: '2026-10-25' });
+        const r3 = makeReminder({ itemId: 'item-same', targetKind: 'EVENT', eventId: 'e1', dueDate: '2026-10-20' });
+
+        const key1 = getDeadlineBarDismissKey(r1, '2026-10-17');
+        const key2 = getDeadlineBarDismissKey(r2, '2026-10-17');
+        const key3 = getDeadlineBarDismissKey(r3, '2026-10-17');
+
+        expect(key1).not.toBe(key2);
+        expect(key1).not.toBe(key3);
+        expect(key2).not.toBe(key3);
+      });
+
+      it('produces different key for a different date', () => {
+        const r1 = makeReminder({ itemId: 'item-a', fieldId: 'field-1', dueDate: '2026-10-20' });
+        const keyToday = getDeadlineBarDismissKey(r1, '2026-10-17');
+        const keyTomorrow = getDeadlineBarDismissKey(r1, '2026-10-18');
         expect(keyToday).not.toBe(keyTomorrow);
-      });
-
-      it('produces different key when shown reminders change', () => {
-        const r1 = makeReminder({ itemId: 'item-a', fieldId: 'field-1' });
-        const r2 = makeReminder({ itemId: 'item-b', fieldId: 'field-2' });
-        const r3 = makeReminder({ itemId: 'item-c', fieldId: 'field-3' });
-
-        const keyA = getDeadlineBarDismissKey('2026-10-17', [r1, r2]);
-        const keyB = getDeadlineBarDismissKey('2026-10-17', [r1, r3]);
-        expect(keyA).not.toBe(keyB);
       });
     });
 

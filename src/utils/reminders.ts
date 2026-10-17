@@ -411,24 +411,56 @@ export interface DeadlineBarSelectionResult {
 }
 
 /**
- * Pure helper to select the 2 nearest reminders across all sections for the main deadline bar.
+ * Pure helper to select nearest non-dismissed reminders across all sections for the main deadline bar.
  * - Filters strictly to status: 'overdue' | 'today' | 'soon'
+ * - Excludes any reminder present in dismissedKeys
  * - Sorts deterministically with compareRemindersByUrgency
- * - Slices first 2 items
- * - Calculates remainingCount (total - 2, minimum 0)
+ * - Slices up to maxVisible items (default 2)
+ * - Calculates remainingCount (total non-dismissed urgent - shown count, minimum 0)
  */
 export function selectDeadlineBarReminders(
-  reminders: ReminderItem[]
+  reminders: ReminderItem[],
+  dismissedKeys?: Set<string> | string[],
+  maxVisible: number = 2,
+  todayStr?: string
 ): DeadlineBarSelectionResult {
-  const urgent = reminders.filter(
-    (r) => r.status === 'overdue' || r.status === 'today' || r.status === 'soon'
-  );
+  const dismissedSet =
+    dismissedKeys instanceof Set
+      ? dismissedKeys
+      : new Set(dismissedKeys || []);
+
+  const urgent = reminders.filter((r) => {
+    if (r.status !== 'overdue' && r.status !== 'today' && r.status !== 'soon') {
+      return false;
+    }
+
+    if (dismissedSet.size === 0) {
+      return true;
+    }
+
+    if (todayStr) {
+      const key = getDeadlineBarDismissKey(r, todayStr);
+      if (dismissedSet.has(key)) return false;
+    } else {
+      const reminderId = r.eventId
+        ? `${r.itemId}:${r.eventId}`
+        : `${r.itemId}:${r.fieldId}`;
+      const keySuffix = `_${reminderId}_${r.dueDate}`;
+      for (const k of dismissedSet) {
+        if (k === keySuffix || k.endsWith(keySuffix)) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  });
 
   urgent.sort(compareRemindersByUrgency);
 
-  const shownReminders = urgent.slice(0, 2);
+  const shownReminders = urgent.slice(0, maxVisible);
   const totalUrgentCount = urgent.length;
-  const remainingCount = Math.max(0, totalUrgentCount - 2);
+  const remainingCount = Math.max(0, totalUrgentCount - shownReminders.length);
 
   return {
     shownReminders,
@@ -508,42 +540,16 @@ export function formatDeadlineBarSegment(
 }
 
 /**
- * Generates localStorage dismissal key from today's date plus the ids of the 2 shown reminders.
- * If the day changes or the shown reminders change, the key differs and the bar reappears.
+ * Generates a unique dismissal key for a specific reminder on todayStr.
+ * Key format: `${todayStr}_${reminderId}_${dueDate}`.
+ * Ensures uniqueness even for two reminders of the same item.
  */
 export function getDeadlineBarDismissKey(
-  todayStr: string,
-  shownReminders: (ReminderItem | string)[]
+  reminder: ReminderItem,
+  todayStr: string
 ): string {
-  const ids = shownReminders.map((item) => {
-    if (typeof item === 'string') return item;
-    return item.eventId
-      ? `${item.itemId}:${item.eventId}`
-      : `${item.itemId}:${item.fieldId}`;
-  });
-  return `evidio_deadline_bar_dismissed_${todayStr}_${ids.join('_')}`;
-}
-
-export function isDeadlineBarDismissed(
-  todayStr: string,
-  shownReminders: (ReminderItem | string)[]
-): boolean {
-  if (typeof window === 'undefined' || !window.localStorage) return false;
-  try {
-    const key = getDeadlineBarDismissKey(todayStr, shownReminders);
-    return window.localStorage.getItem(key) === 'true';
-  } catch {
-    return false;
-  }
-}
-
-export function dismissDeadlineBar(
-  todayStr: string,
-  shownReminders: (ReminderItem | string)[]
-): void {
-  if (typeof window === 'undefined' || !window.localStorage) return;
-  try {
-    const key = getDeadlineBarDismissKey(todayStr, shownReminders);
-    window.localStorage.setItem(key, 'true');
-  } catch {}
+  const reminderId = reminder.eventId
+    ? `${reminder.itemId}:${reminder.eventId}`
+    : `${reminder.itemId}:${reminder.fieldId}`;
+  return `${todayStr}_${reminderId}_${reminder.dueDate}`;
 }
